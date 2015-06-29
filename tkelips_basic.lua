@@ -29,10 +29,10 @@ k = math.floor(math.sqrt(n))
 
 
 GOSSIP_TIME = 5
-TMAN_RANDOM = 2
+TMAN_RANDOM = 3
 TMAN_AG_SIZE = n/k
-TMAN_MESSAGE_SIZE = 4
-TMAN_CONTACT_SIZE = 2
+TMAN_MESSAGE_SIZE = 6
+TMAN_CONTACT_SIZE = 1
 
 -------------------------------------------------------------------------------
 -- current node
@@ -83,17 +83,6 @@ TMAN = {
 		log:print(out)
 	end,
 	
-	--currently only one contact per affinity group
-	display_contacts_old = function(c) 
-		local out = table.concat({"TMAN cycle", " ", c, " ", "APPROX. CONTACTS\t"})
-		for i = 0, k-1 do
-			if TMAN.contacts[i] then
-				out = table.concat({out, i," ",TMAN.contacts[i].id,"(",TMAN.contacts[i].id%k,")\t"})
-			end
-		end
-		log:print(out)
-	end,
-	
 	display_contacts = function(c)
 		local out = table.concat({"TMAN cycle", " ", c, " ", "APPROX. CONTACTS\n"})
 		for i = 0, k-1 do
@@ -114,7 +103,7 @@ TMAN = {
 
 	debug = function(c)
 		TMAN.display_ag(c)
-		TMAN.display_contacts(c)
+		--TMAN.display_contacts(c)
 	end,
 	
 -------------------------------------------------------------------------------
@@ -276,9 +265,163 @@ TMAN = {
 }
 
 -------------------------------------------------------------------------------
+-- key insertion and lookup
+-------------------------------------------------------------------------------
+KELIPS_LOOKUP = {
+	
+	display_ft = function()
+		local out = table.concat({"FILETUPLES ", me.id, "(", me.id%k, ")\n"})
+		for i,v in pairs(TMAN.filetuples) do
+			out = table.concat({out, i, " -> ", v.id, "\n"})
+		end
+		log:print(out)
+	end,
+
+	insert = function(key)
+		local ag = key%k
+		--lookup closest node in contacts at the relevant affinity group
+		local closest = KELIPS_LOOKUP.findClosest(key, ag)
+		--send insert request to the closest node
+		if closest then
+			local ok, res = rpc.acall(closest.peer, {'KELIPS_LOOKUP.insertKey', key})
+			if ok then
+				local homenode = res[1]
+				if homenode then
+					log:print("Key "..key.."(".. key%k..") inserted at node "..homenode.id.."("..homenode.id%k..")")
+				end
+			end
+		end
+	end,
+	
+	findClosest = function(key, ag)
+		local closest = {}
+		if TMAN.contacts[ag] then
+			local ranked = KELIPS_LOOKUP.rank_clockwise(key, TMAN.contacts[ag])
+			return ranked[1]
+		end
+	end,
+
+	insertKey = function(key)	
+		--log:print("Received key for insertion "..key)
+		if TMAN.filetuples[key] == nil then
+		--randomly pick a node from the affinity group
+			local homenode = TMAN.aff_group[math.random(1,#TMAN.aff_group)]		
+			--insert homenode and key in filetuples
+			--log:print("Inserting key "..key.. "->" ..homenode.id)
+			TMAN.filetuples[key] = homenode
+			return homenode
+		end
+	end,
+
+	activeThread = function()
+		local partner = TMAN.aff_group[math.random(1,#TMAN.aff_group)]
+		local buffer = KELIPS_LOOKUP.createMessage()
+		local try = 0
+		local ok, res = rpc.acall(partner.peer, {'KELIPS_LOOKUP.passiveThread', buffer})
+		while not ok do
+			try = try + 1
+			if try <= 3 then
+				log:print("Filetuples active thread: no response from:"..partner.id.. ": "..tostring(res).." => try again")
+				events.sleep(math.random(try * 3, try * 6))
+				ok, res = rpc.acall(partner.peer, {'KELIPS_LOOKUP.passiveThread', buffer})
+			else
+				log:print("KELIPS_LOOKUP active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
+			end
+		end
+		if ok then
+			local received = res[1]
+			KELIPS_LOOKUP.updateFileTuples(received)	
+			--KELIPS_LOOKUP.display_ft()
+		end
+	end,
+
+	passiveThread = function(received)
+		local buffer = KELIPS_LOOKUP.createMessage()
+		KELIPS_LOOKUP.updateFileTuples(received)
+		return buffer
+	end,
+
+	createMessage = function()
+	--log:print("Creating a message ...")
+		--pick a random tuple from filetuples
+		local keys = misc.table_keyset(TMAN.filetuples)
+		local k = misc.random_pick(keys)
+		--log:print("selected key: "..k)
+		local hn = TMAN.filetuples[k]
+		--log:print("selected hn: "..hn.id)
+		buffer = {key = k, homenode = hn}
+		return buffer
+	end,
+
+	updateFileTuples = function(received)
+		local key = received.key
+		local homenode = received.homenode
+		if TMAN.filetuples[key] == nil then
+			--log:print("Updating filetuples with the received: "..received.key.. "->".. homenode.id)
+			TMAN.filetuples[key] = homenode
+		end
+	end,
+
+	initFileTuples = function()
+		local key = me.id
+		TMAN.filetuples[key] = me
+	end,
+
+	rank_clockwise = function(key, set)
+		local distances = {}
+		local ranked = {}
+		for i,v in ipairs(set) do
+			local dist = v.id%n - key%n 
+			local d = 0
+			if dist >= 0 then d = dist
+			else d = dist + n end
+			distances[#distances+1] = {distance= d, node=v}
+		end
+		table.sort(distances, function(a,b) return a.distance < b.distance end)
+		for i,v in ipairs(distances) do
+			ranked[#ranked+1] = v.node
+		end
+		return ranked
+	end,
+
+	lookup = function(key)
+		local ag = key%k
+		local closest = KELIPS_LOOKUP.findClosest(key, ag)
+		local try = 0
+		local ok, res = rpc.acall(closest.peer, {'KELIPS_LOOKUP.findKey', key})
+		if ok then
+			local homenode = res[1]
+			if homenode then log:print("Key "..key.."(".. key%k..") found at node "..homenode.id.."("..homenode.id%k..")")
+			else log:print("Key "..key.."(".. key%k..") not found") end
+		end
+	end,
+
+	findKey = function(key)
+		return TMAN.filetuples[key]
+	end,
+	
+	test_insert = function()
+		local index = job.position+1%n
+		local a_peer = job.nodes[index]
+		local key = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))+index
+		log:print("Starting key insertion: "..key)
+		KELIPS_LOOKUP.insert(key)
+	end,
+	
+	test_lookup = function()
+		local index = job.position+1%n
+		local a_peer = job.nodes[index]
+		local key = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))+index
+		log:print("Starting key lookup: "..key)
+		KELIPS_LOOKUP.lookup(key)
+	end
+
+}
+
+-------------------------------------------------------------------------------
 -- main loop
 -------------------------------------------------------------------------------
-max_time = 180
+max_time = 360
 
 function terminator()
   events.sleep(max_time)
@@ -301,6 +444,23 @@ function main()
 
   --launching TMAN
 	events.periodic(GOSSIP_TIME, TMAN.activeThread)
+	
+	events.sleep(100)
+	
+		KELIPS_LOOKUP.initFileTuples()
+		KELIPS_LOOKUP.test_insert()
+		events.sleep(10)
+		events.periodic(GOSSIP_TIME, KELIPS_LOOKUP.activeThread)
+		events.sleep(100)
+		KELIPS_LOOKUP.test_lookup()
+		
+	
+			
+			
+		
+		
+		
+		
 		
 end  
 
