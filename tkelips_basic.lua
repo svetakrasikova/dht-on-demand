@@ -1,38 +1,63 @@
 -------------------------------------------------------------------------------
--- modules
+-- modules and parameters
 -------------------------------------------------------------------------------
 
 require"splay.base"
 rpc = require"splay.rpc"
 rpc.l_o.level=1
-misc = require "splay.misc"
-crypto = require "crypto"
+misc = require"splay.misc"
+crypto = require"crypto"
+socket = require"socket.core"
 
 -- addition to allow local run
-if not job then 
-  local utils = require("splay.utils")
-  if #arg < 2 then  
-    print("lua "..arg[0].." my_position nb_nodes")  
-    os.exit()  
-  else  
-    local pos, total = tonumber(arg[1]), tonumber(arg[2])  
-    job = utils.generate_job(pos, total, 20001)  
-  end
+PARAMS={}
+local cmd_line_args=nil
+if not job then --outside the sandbox
+	if #arg < 2 then  
+		print("lua ", arg[0], " my_position nb_nodes")  
+		os.exit()  
+	else  		
+		local pos, total = tonumber(arg[1]), tonumber(arg[2])  
+		local utils = require("splay.utils")
+		job = utils.generate_job(pos, total, 20001) 
+		cmd_line_args=arg[3]	
+	end
+	
+	rs=require"splay.restricted_socket"
+	rs.init(
+		{max_sockets=1024}
+	)
+	--already wrapped in sandbox, useful
+	--for local runs with restrictions	
+	socket=rs.wrap(socket)
 end
+
+if arg~=nil then
+	if cmd_line_args==nil then cmd_line_args=arg[1] end
+	if cmd_line_args~=nil and cmd_line_args~="" then
+		print("ARGS: ",cmd_line_args)	
+		for _,v in pairs(misc.split(cmd_line_args,":")) do
+			local t=misc.split(v,"=")
+			PARAMS[t[1]]=t[2]
+		end
+	end
+end
+
 
 rpc.server(job.me.port)
 
 --size of the network
-n = 128
+n = arg[2]
 --number of affinity groups
 k = math.floor(math.sqrt(n))
 
 
-GOSSIP_TIME = 5
-TMAN_RANDOM = 3
+GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 5
+TMAN_RANDOM = tonumber(PARAMS["TMAN_RANDOM"]) or 3
+TMAN_MESSAGE_SIZE = tonumber(PARAMS["TMAN_MESSAGE_SIZE"]) or 6
+TMAN_CONTACT_SIZE = tonumber(PARAMS["TMAN_CONTACT_SIZE"]) or 1
 TMAN_AG_SIZE = n/k
-TMAN_MESSAGE_SIZE = 6
-TMAN_CONTACT_SIZE = 1
+
 
 -------------------------------------------------------------------------------
 -- current node
@@ -401,7 +426,7 @@ KELIPS_LOOKUP = {
 	end,
 	
 	test_insert = function()
-		local index = job.position+1%n
+		local index = job.position%n + 1
 		local a_peer = job.nodes[index]
 		local key = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))+index
 		log:print("Starting key insertion: "..key)
@@ -409,7 +434,7 @@ KELIPS_LOOKUP = {
 	end,
 	
 	test_lookup = function()
-		local index = job.position+1%n
+		local index = job.position%n + 1
 		local a_peer = job.nodes[index]
 		local key = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))+index
 		log:print("Starting key lookup: "..key)
@@ -443,25 +468,18 @@ function main()
 	events.sleep(desync_wait) 
 
   --launching TMAN
-	events.periodic(GOSSIP_TIME, TMAN.activeThread)
+	tman_thread = events.periodic(GOSSIP_TIME, TMAN.activeThread)
 	
 	events.sleep(100)
 	
-		KELIPS_LOOKUP.initFileTuples()
-		KELIPS_LOOKUP.test_insert()
-		events.sleep(10)
-		events.periodic(GOSSIP_TIME, KELIPS_LOOKUP.activeThread)
-		events.sleep(100)
-		KELIPS_LOOKUP.test_lookup()
-		
-	
+	KELIPS_LOOKUP.initFileTuples()
+	KELIPS_LOOKUP.test_insert()
+	events.sleep(20)
+	kelips_thread = events.periodic(GOSSIP_TIME, KELIPS_LOOKUP.activeThread)
+	events.sleep(120)
+	KELIPS_LOOKUP.test_lookup()
+	events.kill({tman_thread, kelips_thread})
 			
-			
-		
-		
-		
-		
-		
 end  
 
 events.thread(main)  
