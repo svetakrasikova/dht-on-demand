@@ -43,3 +43,5 @@ luac.out
 *.log
 
 .gitignore
+.DS_Store
+*.sh

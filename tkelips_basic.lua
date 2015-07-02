@@ -4,7 +4,6 @@
 
 require"splay.base"
 rpc = require"splay.rpc"
-rpc.l_o.level=1
 misc = require"splay.misc"
 crypto = require"crypto"
 socket = require"socket.core"
@@ -47,7 +46,7 @@ end
 rpc.server(job.me.port)
 
 --size of the network
-n = arg[2]
+n = tonumber(arg[2]) 
 --number of affinity groups
 k = math.floor(math.sqrt(n))
 

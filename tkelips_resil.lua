@@ -46,7 +46,7 @@ GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 5
 TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 3
 TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 6
 TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 1
-TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 25
+TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 100
 TKELIPS_AG_SIZE = n/k
 
 
@@ -55,7 +55,7 @@ TKELIPS_AG_SIZE = n/k
 -------------------------------------------------------------------------------
 me = {}
 me.peer = job.me
-me.age = 0
+
 
 M = 32
 function compute_hash(o)
@@ -63,6 +63,7 @@ function compute_hash(o)
 end
 
 me.id = compute_hash(table.concat({tostring(job.me.ip),":",tostring(job.me.port)}))
+me.age = 0
 -- affinity group
 ag = me.id%k
 
@@ -83,9 +84,9 @@ TKELIPS = {
 	cycle = 0,
 	
 	display_view = function(v, which)
- 		local display = table.concat({which," VIEW_CONTENT ",me.id,"(", me.id%k,")\t"})
+ 		local display = table.concat({which," VIEW_CONTENT\t"})
 		for i,w in ipairs(v) do
-			display = table.concat({display ," ", w.id%k})
+			display = table.concat({display ," ", w.id, "(", w.id%k, ")"})
 		end
 		log:print(display)
 	end,
@@ -186,7 +187,7 @@ TKELIPS = {
 			until (index ~= job.position)
 			local a_peer = job.nodes[index]
 			local hashed_index = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))
-			result[#result+1] = {peer=a_peer, id=hashed_index}
+			result[#result+1] = {peer=a_peer, id=hashed_index, age = 0}
 		end
 		return result	
 	end,
@@ -202,7 +203,7 @@ TKELIPS = {
 	end,
 	
 	same_node = function(n1,n2)
-		if n1.ip==n2.ip and n1.port == n2.port then
+		if n1.id ==n2.id and n1.id == n2.id then
 			return true
 		else
 			return false
@@ -217,7 +218,7 @@ TKELIPS = {
 	
 	removeFromAG = function(node)
 		for i,v in ipairs(TKELIPS.aff_group) do
-			if same_node(v, node) then
+			if TKELIPS.same_node(v, node) then
 				table.remove(TKELIPS.aff_group, i)
 				break
 			end
@@ -229,9 +230,10 @@ TKELIPS = {
 			if TKELIPS.contacts[i] then
 				for j = 1, TKELIPS.c do
 					if TKELIPS.contacts[i][j] then
-						if same_node(TKELIPS.contacts[i][j], node) then
+						if TKELIPS.same_node(TKELIPS.contacts[i][j], node) then
 							table.remove(TKELIPS.contacts[i], j)
 							break
+						end
 					end
 				end
 			end
@@ -240,18 +242,18 @@ TKELIPS = {
 	
 	removeStaleNodes = function(set)
 		for i,v in ipairs(set) do
-			if isStale(v) then table.remove(set, i) end
+			if TKELIPS.isStale(v) then table.remove(set, i) end
 		end
 	end,
 	
 	isStale = function(node)
 		if  node.age >= TKELIPS.timeout then return true
 		else return false end
-	end
+	end,
 	
 	updateAge = function(n1,n2)
 		if n1.age > n2.age then n1.age = n2.age end
-	end
+	end,
 	
 
 -------------------------------------------------------------------------------
@@ -280,7 +282,7 @@ TKELIPS = {
 		local is_new = true
 		for i,v in ipairs(ag_candidates) do
 			for j,w in ipairs(TKELIPS.aff_group) do
-				if same_node(w,v) then
+				if TKELIPS.same_node(w,v) then
 					TKELIPS.updateAge(w,v)
 					matched[j] = true
 					is_new = false
@@ -294,7 +296,7 @@ TKELIPS = {
 				v.age = v.age+1
 			end
 		end
-		local merged = misc.merge(TKELIPS.aff_group, new_entries)		
+		local merged = misc.merge(TKELIPS.aff_group, new_entries)
 		TKELIPS.aff_group = merged
 		TKELIPS.removeStaleNodes(TKELIPS.aff_group)
 	end,
@@ -306,8 +308,8 @@ TKELIPS = {
 			if TKELIPS.contacts[ag] == nil then
 				TKELIPS.contacts[ag] = {}
 			end
-			for j,w in TKELIPS.contacts[ag] do
-				if same_node(v,w) then
+			for j,w in ipairs(TKELIPS.contacts[ag]) do
+				if TKELIPS.same_node(v,w) then
 					TKELIPS.updateAge(w,v)
 					is_new = false
 					break
