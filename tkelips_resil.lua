@@ -44,14 +44,15 @@ k = math.floor(math.sqrt(n))
 
 GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 5
 TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 3
-TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 6
-TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 1
-TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 100
-TKELIPS_AG_SIZE = n/k
+TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 10
+TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 2
+TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 300
+TKELIPS_AG_SIZE = math.floor(n/k)
+TKELIPS_CONVERGE = PARAMS["TKELIPS_CONVERGE"] or true
 
 PSS_VIEW_SIZE =tonumber(PARAMS["PSS_VIEW_SIZE"]) or 10
 PSS_SHUFFLE_SIZE =  tonumber(PARAMS["PSS_SHUFFLE_SIZE"]) or math.floor(PSS_VIEW_SIZE / 2 + 0.5)
-PSS_SHUFFLE_PERIOD = tonumber(PARAMS["PSS_SHUFFLE_PERIOD"]) or 20
+PSS_SHUFFLE_PERIOD = tonumber(PARAMS["PSS_SHUFFLE_PERIOD"]) or 10
 
 
 -------------------------------------------------------------------------------
@@ -70,6 +71,31 @@ me.id = compute_hash(table.concat({tostring(job.me.ip),":",tostring(job.me.port)
 me.age = 0
 -- affinity group
 ag = me.id%k
+
+function precompute_aff_group()
+		print("Precomputing ag...")
+		local res = {}
+		if TKELIPS_CONVERGE then
+			for i,v in ipairs(job.nodes) do
+				local id = compute_hash(table.concat({tostring(v.ip),":",tostring(v.port)}))
+				if id%k == ag and (not same_node(v, me)) then
+					res[#res+1] = v
+					print(id.."("..id%k..")")
+				end
+			end
+		end
+		return res
+end
+
+
+	
+function same_node(n1,n2)
+	local peer_first
+	if n1.peer then peer_first = n1.peer else peer_first = n1 end
+	local peer_second
+	if n2.peer then peer_second = n2.peer else peer_second = n2 end
+	return peer_first.port == peer_second.port and peer_first.ip == peer_second.ip
+end
 
 -------------------------------------------------------------------------------
 -- Peer Sampling Service
@@ -338,6 +364,7 @@ PSS = {
 -------------------------------------------------------------------------------
 
 TKELIPS = {
+	complete_aff_group = precompute_aff_group(),
 	aff_group= {},
 	contacts = {},
 	filetuples = {},
@@ -363,9 +390,9 @@ TKELIPS = {
 	
 	display_ag = function(c) 
 		local out = table.concat({"TKELIPS cycle", " ", c, " ", "AFFINITY GROUP VIEW\t"})
-		for i = 1, TKELIPS.t do
-			if TKELIPS.aff_group[i] then
-				out = table.concat({out, i," ",TKELIPS.aff_group[i].id,"(",TKELIPS.aff_group[i].id%k,")\t"})
+		for i,v in ipairs(TKELIPS.aff_group) do
+			if v then
+				out = table.concat({out, i," ",v.id,"(",v.id%k,")\t"})
 			end
 		end
 		log:print(out)
@@ -421,7 +448,7 @@ TKELIPS = {
 
 	remove_node = function(set, partner)
 		for i,v in ipairs(set) do
-			if TKELIPS.same_node(v, partner) then
+			if same_node(v, partner) then
 				table.remove(set, i)
 				break
 			end
@@ -436,6 +463,25 @@ TKELIPS = {
 			local d = 0
 			local dist_clockwise = math.abs(v.id%k - n.id%k)
 			local dist_counter = k - dist_clockwise
+			if dist_clockwise <= dist_counter then d = dist_clockwise
+			else d = dist_counter end
+			distances[#distances+1] = {distance= d, node=v}
+		end
+		table.sort(distances, function(a,b) return a.distance < b.distance end)
+		for i,v in ipairs(distances) do
+			ranked[#ranked+1] = v.node
+		end
+		return ranked
+	end,
+	
+	--ranks nodes from set according to the distance on the ring relative to n
+	rank_old = function(node, set)
+		local distances = {}
+		local ranked = {}
+		for i,v in ipairs(set) do
+			local d = 0
+			local dist_clockwise = math.abs(v.id - node.id)
+			local dist_counter = n - dist_clockwise
 			if dist_clockwise <= dist_counter then d = dist_clockwise
 			else d = dist_counter end
 			distances[#distances+1] = {distance= d, node=v}
@@ -474,14 +520,6 @@ TKELIPS = {
 		end
 		return filtered
 	end,
-	
-	same_node = function(n1,n2)
-		if n1.peer.port ==n2.peer.port and n1.peer.ip == n2.peer.ip then
-			return true
-		else
-			return false
-		end
-	end,
 		
 	remove_failed_node = function(node)
 		TKELIPS.remove_from_ag(node)
@@ -497,7 +535,7 @@ TKELIPS = {
 			if TKELIPS.contacts[i] then
 				for j = 1, TKELIPS.c do
 					if TKELIPS.contacts[i][j] then
-						if TKELIPS.same_node(TKELIPS.contacts[i][j], node) then
+						if same_node(TKELIPS.contacts[i][j], node) then
 							table.remove(TKELIPS.contacts[i], j)
 							break
 						end
@@ -523,12 +561,51 @@ TKELIPS = {
 	end,
 	
 -------------------------------------------------------------------------------
+-- convergence check
+-------------------------------------------------------------------------------
+	
+	check_convergence = function()
+		TKELIPS.check_ag_convergence()
+		TKELIPS.check_contacts_convergence()
+	end,
+	
+	check_ag_convergence = function()
+		local missing = 0
+		for _,v in ipairs(TKELIPS.complete_aff_group) do
+			local found = false
+			for _,w in ipairs(TKELIPS.aff_group) do
+				if same_node(w,v) then
+					found = true
+					break
+				end
+			end
+			if not found then missing = missing + 1 end
+		end
+		log:print("# missing entries in affinity group view: "..missing)
+	end,
+	
+	check_contacts_convergence = function()
+		local missing = 0
+		for i = 0, k-1 do
+			if TKELIPS.contacts[i] then
+				for j = 1, TKELIPS.c do
+					if not TKELIPS.contacts[i][j] then
+						missing = missing +1 
+					end
+				end
+			else missing = missing + TKELIPS.c end
+		end
+		log:print("# missing entries in contacts: "..missing)
+	end,
+	
+-------------------------------------------------------------------------------
 -- T-MAN
 -------------------------------------------------------------------------------
 
 	select_peer = function()
-		local partner = PSS.pss_getPeer()
-		return partner
+		if #TKELIPS.aff_group > 0 then 
+			return misc.random_pick(TKELIPS.aff_group)
+		else return PSS.pss_getPeer() end
 		end,
 
 	create_message = function(partner)
@@ -548,7 +625,7 @@ TKELIPS = {
 		local is_new = true
 		for i,v in ipairs(ag_candidates) do
 			for j,w in ipairs(TKELIPS.aff_group) do
-				if TKELIPS.same_node(w,v) then
+				if same_node(w,v) then
 					TKELIPS.update_age (w,v)
 					matched[j] = true
 					is_new = false
@@ -575,7 +652,7 @@ TKELIPS = {
 				TKELIPS.contacts[ag] = {}
 			end
 			for j,w in ipairs(TKELIPS.contacts[ag]) do
-				if TKELIPS.same_node(v,w) then
+				if same_node(v,w) then
 					TKELIPS.update_age (w,v)
 					is_new = false
 					break
@@ -621,11 +698,13 @@ TKELIPS = {
 			TKELIPS.cycle = TKELIPS.cycle+1
 			TKELIPS.update_aff_group(received)
 			TKELIPS.update_contacts(received)
+			TKELIPS.check_convergence()
 			TKELIPS.debug(loc_cycle)
 		end
 	end,
 	
 }
+
 
 -------------------------------------------------------------------------------
 -- main loop
