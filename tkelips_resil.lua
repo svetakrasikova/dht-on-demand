@@ -689,6 +689,7 @@ TKELIPS = {
 				ok, res = rpc.acall(partner.peer, {'TKELIPS.passive_thread', buffer, me})
 			else
 				log:print("TMAN active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
+				log:print("Removig non-responding node from TMAN View")
 				TKELIPS.remove_failed_node(partner)
 			end
 		end
@@ -732,7 +733,7 @@ function main()
 	log:print("waiting for "..desync_wait.." to desynchronize")
 	events.sleep(desync_wait) 
 	pss_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
-	events.sleep(60)
+	events.sleep(10)
 	tman_thread = events.periodic(GOSSIP_TIME, TKELIPS.active_thread)
 			
 end  
