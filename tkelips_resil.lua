@@ -86,8 +86,6 @@ function precompute_aff_group()
 		end
 		return res
 end
-
-
 	
 function same_node(n1,n2)
 	local peer_first
@@ -609,13 +607,12 @@ TKELIPS = {
 		end,
 
 	create_message = function(partner)
-		local merged =  misc.merge(TKELIPS.aff_group, misc.random_pick(PSS.view, TKELIPS.r))
-		TKELIPS.remove_node(merged, partner)
-		merged[#merged+1] = me
-		TKELIPS.remove_dup(merged)
-		merged = TKELIPS.rank(partner, merged)
-		TKELIPS.keep_n(merged,TKELIPS.m)
-		return merged	
+		local buffer_from_pss = TKELIPS.rank(partner, PSS.view)
+		TKELIPS.remove_node(buffer_from_pss, partner)
+		TKELIPS.keep_n(buffer_from_pss, TKELIPS.r)
+		local buffer_from_ag = TKELIPS.aff_group
+		TKELIPS.remove_node(buffer_from_ag, partner)
+		return misc.merge(buffer_from_pss, misc.random_pick(buffer_from_ag, TKELIPS.m - TKELIPS.r))
 	end,
 
 	update_aff_group = function(received)
