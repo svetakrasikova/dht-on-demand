@@ -43,11 +43,10 @@ k = math.floor(math.sqrt(n))
 
 
 GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 3
-TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 3
+TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 6
 TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 10
 TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 2
 TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 300
-TKELIPS_AG_SIZE = math.floor(n/k)
 TKELIPS_CONVERGE = PARAMS["TKELIPS_CONVERGE"] or true
 
 PSS_VIEW_SIZE =tonumber(PARAMS["PSS_VIEW_SIZE"]) or 10
@@ -70,17 +69,19 @@ end
 me.id = compute_hash(table.concat({tostring(job.me.ip),":",tostring(job.me.port)}))
 me.age = 0
 -- affinity group
-ag = me.id%k
+
+function get_ag(node)
+	return node.id%n%k
+end
+ag = get_ag(me)
 
 function precompute_aff_group()
-		print("Precomputing ag...")
 		local res = {}
 		if TKELIPS_CONVERGE then
 			for i,v in ipairs(job.nodes) do
 				local id = compute_hash(table.concat({tostring(v.ip),":",tostring(v.port)}))
-				if id%k == ag and (not same_node(v, me)) then
+				if (id%n)%k == ag and (not same_node(v, me)) then
 					res[#res+1] = v
-					print(id.."("..id%k..")")
 				end
 			end
 		end
@@ -366,9 +367,8 @@ TKELIPS = {
 	aff_group= {},
 	contacts = {},
 	filetuples = {},
-	t = TKELIPS_AG_SIZE,
 	c = TKELIPS_CONTACT_SIZE,
-	r = TKELIPS_RANDOM,
+	--r = TKELIPS_RANDOM,
 	m = TKELIPS_MESSAGE_SIZE,
 	timeout = TKELIPS_HB_TIMEOUT,
 	aff_group_lock = events.lock(),
@@ -380,32 +380,32 @@ TKELIPS = {
 -------------------------------------------------------------------------------	
 	
 	display_view = function(v, which)
- 		local display = table.concat({which," VIEW_CONTENT\t"})
+ 		local display = table.concat({which," VIEW_CONTENT " ..me.id..":\t"})
 		for i,w in ipairs(v) do
-			display = table.concat({display ," ", w.id, "(", w.id%k, ")"})
+			display = table.concat({display ," ", w.id, "(", get_ag(w), ")"})
 		end
 		log:print(display)
 	end,
 
 	
 	display_ag = function(c) 
-		local out = table.concat({"TKELIPS cycle", " ", c, " ", "AFFINITY GROUP VIEW\t"})
+		local out = table.concat({"TKELIPS cycle", " ", c, " ", "AG VIEW "..me.id..":\t"})
 		for i,v in ipairs(TKELIPS.aff_group) do
 			if v then
-				out = table.concat({out, i," ",v.id,"(",v.id%k,")\t"})
+				out = table.concat({out, i," ",v.id,"(",get_ag(v),") "})
 			end
 		end
 		log:print(out)
 	end,
 	
 	display_contacts = function(c)
-		local out = table.concat({"TKELIPS cycle", " ", c, " ", "CONTACTS\n"})
+		local out = table.concat({"TKELIPS cycle", " ", c, " ", "CONTACTS "..me.id..":\n"})
 		for i = 0, k-1 do
 			if TKELIPS.contacts[i] then
 			local str = table.concat({i,": "})
 				for j = 1, TKELIPS.c do
 					if TKELIPS.contacts[i][j] then
-						str = table.concat({str," ",TKELIPS.contacts[i][j].id,"(",TKELIPS.contacts[i][j].id%k,")"})
+						str = table.concat({str," ",TKELIPS.contacts[i][j].id,"(",get_ag(TKELIPS.contacts[i][j]),")"})
 					else
 						str = table.concat({str," -"})
 					end
@@ -456,12 +456,12 @@ TKELIPS = {
 	end,
 
 	--ranks nodes from set according to the distance on the ring relative to n
-	rank_old = function(n, set)
+	rank = function(n, set)
 		local distances = {}
 		local ranked = {}
 		for i,v in ipairs(set) do
 			local d = 0
-			local dist_clockwise = math.abs(v.id%k - n.id%k)
+			local dist_clockwise = math.abs(get_ag(v) - get_ag(n))
 			local dist_counter = k - dist_clockwise
 			if dist_clockwise <= dist_counter then d = dist_clockwise
 			else d = dist_counter end
@@ -475,7 +475,7 @@ TKELIPS = {
 	end,
 	
 	--ranks nodes from set according to the counter-clockwise distance on the ring relative to node
-	rank = function(node, set)
+	rank_old = function(node, set)
 		local distances = {}
 		local ranked = {}
 		for i,v in ipairs(set) do
@@ -510,7 +510,7 @@ TKELIPS = {
 	filter_ag = function(received, ag)
 		local filtered = {}
 		for _,v in ipairs(received) do
-			if v.id%k == ag then
+			if get_ag(v) == ag then
 				filtered[#filtered+1] = v
 			end
 		end
@@ -593,43 +593,26 @@ TKELIPS = {
 -------------------------------------------------------------------------------
 
 	select_peer = function()
-		--if #TKELIPS.aff_group > 0 then 
---			return misc.random_pick(TKELIPS.aff_group)
---		else return PSS.pss_getPeer() end
-			return PSS.pss_getPeer()
+		if #TKELIPS.aff_group > 0 then 
+			return misc.random_pick(TKELIPS.aff_group)
+		else return PSS.pss_getPeer() end
+			--return PSS.pss_getPeer()
 		end,
 
 	create_message = function(partner)
 		--get r nodes from PSS, excluding the partner
---		PSS.view_copy_lock:lock()
---		--local buffer_from_pss = TKELIPS.rank(partner, PSS.view_copy)
---		local buffer_from_pss = misc.dup(PSS.view_copy)
---		PSS.view_copy_lock:unlock()
---		TKELIPS.remove_node(buffer_from_pss, partner)
---		--TKELIPS.keep_n(buffer_from_pss, TKELIPS.r)
---		buffer_from_pss = misc.random_pick(buffer_from_pss, TKELIPS.r)
---		
---		--get m-r nodes from aff_group, excluding the partner
---		TKELIPS.aff_group_lock:lock()
---		local buffer_from_ag = misc.dup(TKELIPS.aff_group)
---		TKELIPS.aff_group_lock:unlock()
---		TKELIPS.remove_node(buffer_from_ag, partner)
---		
---		local res = misc.merge(buffer_from_pss, buffer_from_ag)
---		TKELIPS.remove_dup(res)
---		res = misc.random_pick(res, TKELIPS.m)
 		PSS.view_copy_lock:lock()
-		local buffer_from_pss = TKELIPS.rank(partner, PSS.view_copy)
 		local buffer_from_pss = misc.dup(PSS.view_copy)
 		PSS.view_copy_lock:unlock()
 		
 		TKELIPS.aff_group_lock:lock()
 		local buffer_from_ag = misc.dup(TKELIPS.aff_group)
-		TKELIPS.aff_group_lock:unlock()
+		TKELIPS.aff_group_lock:unlock()	
 		
-		local res = misc.merge(buffer_from_ag, buffer_from_pss)
-		res = TKELIPS.rank(partner, res)
-		TKELIPS.keep_n(res, TKELIPS.m)	
+		local res = misc.merge(buffer_from_pss, buffer_from_ag)
+		TKELIPS.remove_dup(res)
+		TKELIPS.remove_node(res, partner)
+		res = misc.random_pick(res, TKELIPS.m)
 		return res
 	end,
 
