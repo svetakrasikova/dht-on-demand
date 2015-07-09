@@ -41,14 +41,18 @@ n = tonumber(arg[2])
 --number of affinity groups
 k = math.floor(math.sqrt(n))
 
-
+--TKELIPS params
 GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 3
 TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 6
 TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 10
 TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 2
 TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 300
-TKELIPS_CONVERGE = PARAMS["TKELIPS_CONVERGE"] or true
+TKELIPS_CONVERGE = PARAMS["TKELIPS_CONVERGE"] or false
 
+--KELIPS lookup params
+KELIPS_LOOKUP_TEST = PARAMS["KELIPS_LOOKUP_TEST"] or true
+
+--PSS params
 PSS_VIEW_SIZE =tonumber(PARAMS["PSS_VIEW_SIZE"]) or 10
 PSS_SHUFFLE_SIZE =  tonumber(PARAMS["PSS_SHUFFLE_SIZE"]) or math.floor(PSS_VIEW_SIZE / 2 + 0.5)
 PSS_SHUFFLE_PERIOD = tonumber(PARAMS["PSS_SHUFFLE_PERIOD"]) or 10
@@ -73,15 +77,15 @@ me.age = 0
 
 
 -- current node's affinity group
-function get_ag(node)
-	return node.id%n%k
+function get_ag(node) 
+	return node.id%n%k or node%n%k
 end
 ag = get_ag(me)
 	
 
--------------------------------------------------------------------------------
--- Peer Sampling Service
--------------------------------------------------------------------------------
+-- ############################################################################
+-- 	Peer Sampling Service
+-- ############################################################################
 
 PSS = {
 
@@ -341,9 +345,10 @@ PSS = {
 
 }
 
--------------------------------------------------------------------------------
--- T-KELIPS
--------------------------------------------------------------------------------
+
+-- ############################################################################
+-- 	T-KELIPS
+-- ############################################################################
 
 TKELIPS = {
 	complete_aff_group = {},
@@ -356,6 +361,7 @@ TKELIPS = {
 	timeout = TKELIPS_HB_TIMEOUT,
 	aff_group_lock = events.lock(),
 	contacts_lock = events.lock(),
+	ft_lock = events.lock(),
 	cycle = 0,
 	missing_mandatory = 0,
 	missing_optional = 0,
@@ -449,7 +455,7 @@ TKELIPS = {
 		end
 	end,
 
-	--ranks nodes from set according to the distance on the ring relative to n
+	--ranks nodes in set according to the distance on the ring relative to n
 	rank = function(n, set)
 		local distances = {}
 		local ranked = {}
@@ -469,7 +475,7 @@ TKELIPS = {
 	end,
 	
 	--ranks nodes from set according to the counter-clockwise distance on the ring relative to node
-	rank_old = function(node, set)
+	rank_unused = function(node, set)
 		local distances = {}
 		local ranked = {}
 		for i,v in ipairs(set) do
@@ -504,7 +510,7 @@ TKELIPS = {
 		if TKELIPS_CONVERGE then
 			for i,v in ipairs(job.nodes) do
 				local id = compute_hash(table.concat({tostring(v.ip),":",tostring(v.port)}))
-				if (id%n)%k == ag and (not TKELIPS.same_node(v, me)) then
+				if get_ag(id) == ag and (not TKELIPS.same_node(v, me)) then
 					TKELIPS.complete_aff_group[#TKELIPS.complete_aff_group+1] = v
 				end
 			end
@@ -608,7 +614,7 @@ end
 	end,
 	
 -------------------------------------------------------------------------------
--- T-MAN
+-- T-MAN functions
 -------------------------------------------------------------------------------
 
 	select_peer = function()
@@ -740,11 +746,163 @@ end
 	
 }
 
+-- ############################################################################
+-- 	KELIPS KEY INSERTION/LOOKUP
+-- ############################################################################
+
+KELIPS_LOOKUP = {
+	
+	display_ft = function()
+		local out = table.concat({"FILETUPLES ", me.id, "(", get_ag(me.id), ")\n"})
+		for i,v in pairs(TKELIPS.filetuples) do
+			out = table.concat({out, i, " -> ", v.id, "\n"})
+		end
+		log:print(out)
+	end,
+
+	insert = function(key)
+		local ag = get_ag(key)
+		--lookup the closest node in contacts at the key's AG
+		local closest = KELIPS_LOOKUP.find_closest(key, ag)
+		--send insert request to the closest node
+		if closest then
+			local ok, res = rpc.acall(closest.peer, {'KELIPS_LOOKUP.insert_key', key})
+			if ok then
+				local homenode = res[1]
+				if homenode then
+					log:print("Key "..key.."(".. get_ag(key).."): inserted at node "..homenode.id.."("..get_ag(homenode)..")")
+				end
+			end
+		else
+			--no contact has been found
+			log:print("Key "..key.."(".. get_ag(key).."): failed insertion")
+		end
+	end,
+	
+	-- TODO: return topologically closest contact
+	find_closest = function(key, ag)
+		TKELIPS.contacts_lock:lock()
+		if TKELIPS.contacts[ag] then	
+			return misc.random_pick (TKELIPS.contacts[ag])
+		end
+		TKELIPS.contacts_lock:unlock()
+	end,
+
+	insert_key = function(key)	
+		--log:print("Received key for insertion "..key)
+		TKELIPS.ft_lock:lock()
+		if TKELIPS.filetuples[key] == nil then
+		--randomly pick a node from the affinity group
+			TKELIPS.aff_group_lock.lock()
+			local homenode = misc.random_pick(TKELIPS.aff_group)
+			TKELIPS.aff_group_lock.unlock()
+			--insert homenode and key in filetuples
+			--log:print("Inserting key "..key.. "->" ..homenode.id)
+			TKELIPS.filetuples[key] = homenode
+			return homenode
+		end
+		TKELIPS.ft_lock:unlock()
+	end,
+
+	active_thread = function()
+		TKELIPS.aff_group_lock:lock()
+		local partner = misc.random_pick(TKELIPS.aff_group)
+		TKELIPS.aff_group_lock:unlock()
+		local buffer = KELIPS_LOOKUP.createMessage()
+		local try = 0
+		local ok, res = rpc.acall(partner.peer, {'KELIPS_LOOKUP.passive_thread', buffer})
+		while not ok do
+			try = try + 1
+			if try <= 3 then
+				log:print("Filetuples active thread: no response from:"..partner.id.. ": "..tostring(res).." => try again")
+				events.sleep(math.random(try * 3, try * 6))
+				ok, res = rpc.acall(partner.peer, {'KELIPS_LOOKUP.passive_thread', buffer})
+			else
+				log:print("KELIPS_LOOKUP active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
+			end
+		end
+		if ok then
+			local received = res[1]
+			KELIPS_LOOKUP.update_file_tuples(received)	
+			--KELIPS_LOOKUP.display_ft()
+		end
+	end,
+
+	passive_thread = function(received)
+		local buffer = KELIPS_LOOKUP.create_message()
+		KELIPS_LOOKUP.update_file_tuples(received)
+		return buffer
+	end,
+
+	create_message = function()
+		--pick a random tuple from filetuples
+		TKELIPS.ft_lock:lock()
+		local keys = misc.table_keyset(TKELIPS.filetuples)
+		local k = misc.random_pick(keys)
+		local hn = TKELIPS.filetuples[k]
+		TKELIPS.ft_lock:unlock()
+		buffer = {key = k, homenode = hn}
+		return buffer
+	end,
+
+	update_file_tuples = function(received)
+		local key = received.key
+		local homenode = received.homenode
+		TKELIPS.ft_lock:lock()
+		if TKELIPS.filetuples[key] == nil then
+			TKELIPS.filetuples[key] = homenode
+		end
+		TKELIPS.ft_lock:unlock()
+	end,
+
+	init_file_tuples = function()
+		local key = me.id
+		TKELIPS.filetuples[key] = me
+	end,
+
+	lookup = function(key)
+		local ag = get_ag(key)
+		local closest = KELIPS_LOOKUP.find_closest(key, ag)
+		local try = 0
+		local ok, res = rpc.acall(closest.peer, {'KELIPS_LOOKUP.find_key', key})
+		if ok then
+			local homenode = res[1]
+			if homenode then log:print("Key "..key.."(".. get_ag(key).."): found at node "..homenode.id.."("..get_ag(homenode)..")")
+			else log:print("Key "..key.."(".. get_ag(key).."): lookup failure") end
+		end
+	end,
+
+	find_key = function(key)
+		TKELIPS.ft_lock:lock()
+		local hn = TKELIPS.filetuples[key]
+		TKELIPS.ft_lock:lock()
+		return hn
+	end,
+	
+	test_insert = function()
+		local index = job.position%n + 1
+		local a_peer = job.nodes[index]
+		local key = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))+index
+		log:print("Starting key insertion: "..key)
+		KELIPS_LOOKUP.insert(key)
+	end,
+	
+	test_lookup = function()
+		local index = job.position%n + 1
+		local a_peer = job.nodes[index]
+		local key = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))+index
+		log:print("Starting key lookup: "..key)
+		KELIPS_LOOKUP.lookup(key)
+	end
+
+}
+
+
 
 -------------------------------------------------------------------------------
 -- main loop
 -------------------------------------------------------------------------------
-max_time = 360
+max_time = 600
 
 function terminator()
   events.sleep(max_time)
@@ -770,7 +928,19 @@ function main()
 	events.sleep(desync_wait) 
 	pss_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
 	events.sleep(10)
-	tman_thread = events.periodic(GOSSIP_TIME, TKELIPS.active_thread)
+	TKELIPS_thread = events.periodic(GOSSIP_TIME, TKELIPS.active_thread)
+	
+	events.sleep(250)
+	
+-- test insertion and lookup
+	if KELIPS_LOOKUP_TEST then
+		KELIPS_LOOKUP.initFileTuples()
+		KELIPS_LOOKUP.test_insert()
+		events.sleep(20)
+		kelips_lookup_thread = events.periodic(GOSSIP_TIME, KELIPS_LOOKUP.activeThread)
+		events.sleep(120)
+		KELIPS_LOOKUP.test_lookup()
+	end
 			
 end  
 
