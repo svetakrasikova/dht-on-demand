@@ -60,41 +60,24 @@ PSS_SHUFFLE_PERIOD = tonumber(PARAMS["PSS_SHUFFLE_PERIOD"]) or 10
 me = {}
 me.peer = job.me
 
+--current node's id
 
 M = 32
 function compute_hash(o)
 	return tonumber(string.sub(crypto.evp.new("sha1"):digest(o), 1, M/4), 16)
 end
-
 me.id = compute_hash(table.concat({tostring(job.me.ip),":",tostring(job.me.port)}))
-me.age = 0
--- affinity group
 
+--current node's age
+me.age = 0
+
+
+-- current node's affinity group
 function get_ag(node)
 	return node.id%n%k
 end
 ag = get_ag(me)
-
-function precompute_aff_group()
-		local res = {}
-		if TKELIPS_CONVERGE then
-			for i,v in ipairs(job.nodes) do
-				local id = compute_hash(table.concat({tostring(v.ip),":",tostring(v.port)}))
-				if (id%n)%k == ag and (not same_node(v, me)) then
-					res[#res+1] = v
-				end
-			end
-		end
-		return res
-end
 	
-function same_node(n1,n2)
-	local peer_first
-	if n1.peer then peer_first = n1.peer else peer_first = n1 end
-	local peer_second
-	if n2.peer then peer_second = n2.peer else peer_second = n2 end
-	return peer_first.port == peer_second.port and peer_first.ip == peer_second.ip
-end
 
 -------------------------------------------------------------------------------
 -- Peer Sampling Service
@@ -363,7 +346,7 @@ PSS = {
 -------------------------------------------------------------------------------
 
 TKELIPS = {
-	complete_aff_group = precompute_aff_group(),
+	complete_aff_group = {},
 	aff_group= {},
 	contacts = {},
 	filetuples = {},
@@ -374,6 +357,8 @@ TKELIPS = {
 	aff_group_lock = events.lock(),
 	contacts_lock = events.lock(),
 	cycle = 0,
+	missing_mandatory = 0,
+	missing_optional = 0,
 	
 -------------------------------------------------------------------------------
 -- debug
@@ -424,6 +409,15 @@ TKELIPS = {
 -------------------------------------------------------------------------------
 -- utilities
 -------------------------------------------------------------------------------
+
+	same_node = function(n1,n2)
+		local peer_first
+		if n1.peer then peer_first = n1.peer else peer_first = n1 end
+		local peer_second
+		if n2.peer then peer_second = n2.peer else peer_second = n2 end
+		return peer_first.port == peer_second.port and peer_first.ip == peer_second.ip
+	end
+	
 	-- remove duplicates from view
 	remove_dup = function(set)
 		--local rd = misc.time()
@@ -448,7 +442,7 @@ TKELIPS = {
 
 	remove_node = function(set, partner)
 		for i,v in ipairs(set) do
-			if same_node(v, partner) then
+			if TKELIPS.same_node(v, partner) then
 				table.remove(set, i)
 				break
 			end
@@ -506,6 +500,17 @@ TKELIPS = {
 		return result	
 	end,
 	
+	precompute_aff_group = function()
+		if TKELIPS_CONVERGE then
+			for i,v in ipairs(job.nodes) do
+				local id = compute_hash(table.concat({tostring(v.ip),":",tostring(v.port)}))
+				if (id%n)%k == ag and (not TKELIPS.same_node(v, me)) then
+					TKELIPS.complete_aff_group[#TKELIPS.complete_aff_group+1] = v
+				end
+			end
+		end
+end
+	
 	--return nodes from received that belong to the affinity group ag
 	filter_ag = function(received, ag)
 		local filtered = {}
@@ -531,7 +536,7 @@ TKELIPS = {
 			if TKELIPS.contacts[i] then
 				for j = 1, TKELIPS.c do
 					if TKELIPS.contacts[i][j] then
-						if same_node(TKELIPS.contacts[i][j], node) then
+						if TKELIPS.same_node(TKELIPS.contacts[i][j], node) then
 							table.remove(TKELIPS.contacts[i], j)
 							break
 						end
@@ -563,6 +568,7 @@ TKELIPS = {
 	check_convergence = function()
 		TKELIPS.check_ag_convergence()
 		TKELIPS.check_contacts_convergence()
+		log:print("# MISSING ENTRIES mandatory:"..TKELIPS.missing_mandatory.. "\toptional:"..TKELIPS.missing_optional)
 	end,
 	
 	check_ag_convergence = function()
@@ -570,12 +576,15 @@ TKELIPS = {
 		for _,v in ipairs(TKELIPS.complete_aff_group) do
 			local found = false
 			for _,w in ipairs(TKELIPS.aff_group) do
-				if same_node(w,v) then
+				if TKELIPS.same_node(w,v) then
 					found = true
 					break
 				end
 			end
-			if not found then missing = missing + 1 end
+			if not found then
+				TKELIPS.missing_mandatory = TKELIPS.missing_mandatory + 1
+				missing = missing + 1
+			end
 		end
 		log:print("# missing entries in affinity group view: "..missing)
 	end,
@@ -583,7 +592,17 @@ TKELIPS = {
 	check_contacts_convergence = function()
 		local missing = 0
 		for i = 0, k-1 do
-			if not TKELIPS.contacts[i] then missing = missing +1 end
+			if TKELIPS.contacts[i] then
+				for j = 0, #TKELIPS.contacts[i] do
+					if not KELIPS.contacts[i][j] then 
+						TKELIPS.missing_optional = TKELIPS.missing_optional + 1
+						missing = missing + 1
+					end
+				end
+			else
+				TKELIPS.missing_mandatory = TKELIPS.missing_mandatory + 1
+				missing = missing + TKELIPS.c
+			end
 		end
 		log:print("# missing entries in contacts: "..missing)
 	end,
@@ -625,7 +644,7 @@ TKELIPS = {
 		local is_new = true
 		for i,v in ipairs(ag_candidates) do
 			for j,w in ipairs(TKELIPS.aff_group) do
-				if same_node(w,v) then
+				if TKELIPS.same_node(w,v) then
 					TKELIPS.update_age (w,v)
 					matched[j] = true
 					is_new = false
@@ -655,7 +674,7 @@ TKELIPS = {
 				TKELIPS.contacts[ag] = {}
 			end
 			for j,w in ipairs(TKELIPS.contacts[ag]) do
-				if same_node(v,w) then
+				if TKELIPS.same_node(v,w) then
 					TKELIPS.update_age (w,v)
 					is_new = false
 					break
@@ -737,6 +756,8 @@ function main()
 	events.thread(terminator)
 	log:print("UP: "..job.me.ip..":"..job.me.port)
 	log:print(table.concat({"ME: ", me.id, " (", me.id%k, ")"}))
+-- precompute current node affinity group for checking convergence
+	TKELIPS.precompute_aff_group()
 -- initialize the peer sampling service
 	PSS.pss_init()
 -- init random number generator
