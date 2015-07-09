@@ -42,12 +42,11 @@ n = tonumber(arg[2])
 k = math.floor(math.sqrt(n))
 
 
-GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 5
-TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 3
+GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 3
+TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 6
 TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 10
 TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 2
 TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 300
-TKELIPS_AG_SIZE = math.floor(n/k)
 TKELIPS_CONVERGE = PARAMS["TKELIPS_CONVERGE"] or true
 
 PSS_VIEW_SIZE =tonumber(PARAMS["PSS_VIEW_SIZE"]) or 10
@@ -70,24 +69,24 @@ end
 me.id = compute_hash(table.concat({tostring(job.me.ip),":",tostring(job.me.port)}))
 me.age = 0
 -- affinity group
-ag = me.id%k
+
+function get_ag(node)
+	return node.id%n%k
+end
+ag = get_ag(me)
 
 function precompute_aff_group()
-		print("Precomputing ag...")
 		local res = {}
 		if TKELIPS_CONVERGE then
 			for i,v in ipairs(job.nodes) do
 				local id = compute_hash(table.concat({tostring(v.ip),":",tostring(v.port)}))
-				if id%k == ag and (not same_node(v, me)) then
+				if (id%n)%k == ag and (not same_node(v, me)) then
 					res[#res+1] = v
-					print(id.."("..id%k..")")
 				end
 			end
 		end
 		return res
 end
-
-
 	
 function same_node(n1,n2)
 	local peer_first
@@ -347,7 +346,7 @@ PSS = {
 		end
 		PSS.view_copy = misc.dup(PSS.view)
 		assert (#PSS.view == math.min(PSS.c,#indexes))
-		PSS.print_view("initial view")
+		--PSS.print_view("initial view")
 	end,
 
 	
@@ -368,11 +367,12 @@ TKELIPS = {
 	aff_group= {},
 	contacts = {},
 	filetuples = {},
-	t = TKELIPS_AG_SIZE,
 	c = TKELIPS_CONTACT_SIZE,
-	r = TKELIPS_RANDOM,
+	--r = TKELIPS_RANDOM,
 	m = TKELIPS_MESSAGE_SIZE,
 	timeout = TKELIPS_HB_TIMEOUT,
+	aff_group_lock = events.lock(),
+	contacts_lock = events.lock(),
 	cycle = 0,
 	
 -------------------------------------------------------------------------------
@@ -380,32 +380,32 @@ TKELIPS = {
 -------------------------------------------------------------------------------	
 	
 	display_view = function(v, which)
- 		local display = table.concat({which," VIEW_CONTENT\t"})
+ 		local display = table.concat({which," VIEW_CONTENT " ..me.id..":\t"})
 		for i,w in ipairs(v) do
-			display = table.concat({display ," ", w.id, "(", w.id%k, ")"})
+			display = table.concat({display ," ", w.id, "(", get_ag(w), ")"})
 		end
 		log:print(display)
 	end,
 
 	
 	display_ag = function(c) 
-		local out = table.concat({"TKELIPS cycle", " ", c, " ", "AFFINITY GROUP VIEW\t"})
+		local out = table.concat({"TKELIPS cycle", " ", c, " ", "AG VIEW "..me.id..":\t"})
 		for i,v in ipairs(TKELIPS.aff_group) do
 			if v then
-				out = table.concat({out, i," ",v.id,"(",v.id%k,")\t"})
+				out = table.concat({out, i," ",v.id,"(",get_ag(v),") "})
 			end
 		end
 		log:print(out)
 	end,
 	
 	display_contacts = function(c)
-		local out = table.concat({"TKELIPS cycle", " ", c, " ", "CONTACTS\n"})
+		local out = table.concat({"TKELIPS cycle", " ", c, " ", "CONTACTS "..me.id..":\n"})
 		for i = 0, k-1 do
 			if TKELIPS.contacts[i] then
 			local str = table.concat({i,": "})
 				for j = 1, TKELIPS.c do
 					if TKELIPS.contacts[i][j] then
-						str = table.concat({str," ",TKELIPS.contacts[i][j].id,"(",TKELIPS.contacts[i][j].id%k,")"})
+						str = table.concat({str," ",TKELIPS.contacts[i][j].id,"(",get_ag(TKELIPS.contacts[i][j]),")"})
 					else
 						str = table.concat({str," -"})
 					end
@@ -461,7 +461,7 @@ TKELIPS = {
 		local ranked = {}
 		for i,v in ipairs(set) do
 			local d = 0
-			local dist_clockwise = math.abs(v.id%k - n.id%k)
+			local dist_clockwise = math.abs(get_ag(v) - get_ag(n))
 			local dist_counter = k - dist_clockwise
 			if dist_clockwise <= dist_counter then d = dist_clockwise
 			else d = dist_counter end
@@ -474,16 +474,12 @@ TKELIPS = {
 		return ranked
 	end,
 	
-	--ranks nodes from set according to the distance on the ring relative to n
+	--ranks nodes from set according to the counter-clockwise distance on the ring relative to node
 	rank_old = function(node, set)
 		local distances = {}
 		local ranked = {}
 		for i,v in ipairs(set) do
-			local d = 0
-			local dist_clockwise = math.abs(v.id - node.id)
-			local dist_counter = n - dist_clockwise
-			if dist_clockwise <= dist_counter then d = dist_clockwise
-			else d = dist_counter end
+			local d = n - math.abs(v.id%n - node.id%n)
 			distances[#distances+1] = {distance= d, node=v}
 		end
 		table.sort(distances, function(a,b) return a.distance < b.distance end)
@@ -514,7 +510,7 @@ TKELIPS = {
 	filter_ag = function(received, ag)
 		local filtered = {}
 		for _,v in ipairs(received) do
-			if v.id%k == ag then
+			if get_ag(v) == ag then
 				filtered[#filtered+1] = v
 			end
 		end
@@ -587,13 +583,7 @@ TKELIPS = {
 	check_contacts_convergence = function()
 		local missing = 0
 		for i = 0, k-1 do
-			if TKELIPS.contacts[i] then
-				for j = 1, TKELIPS.c do
-					if not TKELIPS.contacts[i][j] then
-						missing = missing +1 
-					end
-				end
-			else missing = missing + TKELIPS.c end
+			if not TKELIPS.contacts[i] then missing = missing +1 end
 		end
 		log:print("# missing entries in contacts: "..missing)
 	end,
@@ -606,19 +596,29 @@ TKELIPS = {
 		if #TKELIPS.aff_group > 0 then 
 			return misc.random_pick(TKELIPS.aff_group)
 		else return PSS.pss_getPeer() end
+			--return PSS.pss_getPeer()
 		end,
 
 	create_message = function(partner)
-		local merged =  misc.merge(TKELIPS.aff_group, misc.random_pick(PSS.view, TKELIPS.r))
-		TKELIPS.remove_node(merged, partner)
-		merged[#merged+1] = me
-		TKELIPS.remove_dup(merged)
-		merged = TKELIPS.rank(partner, merged)
-		TKELIPS.keep_n(merged,TKELIPS.m)
-		return merged	
+		--get r nodes from PSS, excluding the partner
+		PSS.view_copy_lock:lock()
+		local buffer_from_pss = misc.dup(PSS.view_copy)
+		PSS.view_copy_lock:unlock()
+		
+		TKELIPS.aff_group_lock:lock()
+		local buffer_from_ag = misc.dup(TKELIPS.aff_group)
+		TKELIPS.aff_group_lock:unlock()	
+		
+		local res = misc.merge(buffer_from_pss, buffer_from_ag)
+		TKELIPS.remove_dup(res)
+		TKELIPS.remove_node(res, partner)
+		res = misc.random_pick(res, TKELIPS.m)
+		return res
 	end,
 
 	update_aff_group = function(received)
+		TKELIPS.aff_group_lock:lock()
+		--log:print("aff_group_lock acquired "..misc.time())
 		local ag_candidates = TKELIPS.filter_ag(received, ag)
 		local new_entries = {}
 		local matched = {}
@@ -642,9 +642,12 @@ TKELIPS = {
 		local merged = misc.merge(TKELIPS.aff_group, new_entries)
 		TKELIPS.aff_group = merged
 		TKELIPS.remove_stale_nodes(TKELIPS.aff_group)
+		TKELIPS.aff_group_lock:unlock()
+		--log:print("aff_group_lock released "..misc.time())
 	end,
 
 	update_contacts = function(received)
+		TKELIPS.contacts_lock:lock()
 		for i,v in ipairs(received) do
 			local ag = v.id%k
 			local is_new = true
@@ -667,9 +670,13 @@ TKELIPS = {
 				TKELIPS.remove_stale_nodes(TKELIPS.contacts[ag])
 			end		
 		end
+		TKELIPS.contacts_lock:unlock()
 	end,
+	
+	--ongoing_rpc=false,
 
 	passive_thread = function(received,sender)
+		--if TKELIPS.ongoing_rpc == true then return false end
 		local buffer = TKELIPS.create_message(sender)
 		TKELIPS.update_aff_group(received)
 		TKELIPS.update_contacts(received)
@@ -677,6 +684,7 @@ TKELIPS = {
 	end,
 
 	active_thread = function()
+		--TKELIPS.ongoing_rpc = true
 		local partner = TKELIPS.select_peer()
 		local buffer = TKELIPS.create_message(partner)
 		local try = 0
@@ -684,24 +692,31 @@ TKELIPS = {
 		while not ok do
 			try = try + 1
 			if try <= 2 then
-				log:print("TMAN active thread: no response from:"..partner.id.. ": "..tostring(res).." => try again")
+				log:print("TKELIPS active thread: no response from:"..partner.id.. ": "..tostring(res).." => try again")
 				events.sleep(math.random(try * 3, try * 6))
 				ok, res = rpc.acall(partner.peer, {'TKELIPS.passive_thread', buffer, me})
 			else
-				log:print("TMAN active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
-				log:print("Removig non-responding node from TMAN View")
+				log:print("TKELIPS active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
+				log:print("TKELIPS active thread: removing non-responding node from AG VIEW")
 				TKELIPS.remove_failed_node(partner)
 			end
 		end
 		if ok then
 			local received = res[1]
-			local loc_cycle = TKELIPS.cycle+1
-			TKELIPS.cycle = TKELIPS.cycle+1
-			TKELIPS.update_aff_group(received)
-			TKELIPS.update_contacts(received)
-			TKELIPS.check_convergence()
-			TKELIPS.debug(loc_cycle)
+			if received==false then
+					log:print("TKELIPS received false due to ongoing RPC, will try again in a short while")
+					events.sleep(math.random())	
+					--the call was aborted due to pending RPC at peer's node
+				else
+					local loc_cycle = TKELIPS.cycle+1
+					TKELIPS.cycle = TKELIPS.cycle+1
+					TKELIPS.update_aff_group(received)
+					TKELIPS.update_contacts(received)
+					TKELIPS.check_convergence()
+					TKELIPS.debug(loc_cycle)
+				end		
 		end
+		--TKELIPS.ongoing_rpc = false
 	end,
 	
 }
