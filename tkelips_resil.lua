@@ -47,10 +47,10 @@ TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 6
 TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 10
 TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 2
 TKELIPS_HB_TIMEOUT = tonumber(PARAMS["TKELIPS_HB_TIMEOUT"]) or 300
-TKELIPS_CONVERGE = PARAMS["TKELIPS_CONVERGE"] or false
+TKELIPS_CONVERGE = PARAMS["TKELIPS_CONVERGE"] or true
 
 --KELIPS lookup params
-KELIPS_LOOKUP_TEST = PARAMS["KELIPS_LOOKUP_TEST"] or true
+KELIPS_LOOKUP_TEST = PARAMS["KELIPS_LOOKUP_TEST"] or false
 
 --PSS params
 PSS_VIEW_SIZE =tonumber(PARAMS["PSS_VIEW_SIZE"]) or 10
@@ -77,8 +77,9 @@ me.age = 0
 
 
 -- current node's affinity group
-function get_ag(node) 
-	return node.id%n%k or node%n%k
+function get_ag(node)
+	if type(node) == "table" then return node.id%n%k
+	else return node%n%k end
 end
 ag = get_ag(me)
 	
@@ -422,7 +423,7 @@ TKELIPS = {
 		local peer_second
 		if n2.peer then peer_second = n2.peer else peer_second = n2 end
 		return peer_first.port == peer_second.port and peer_first.ip == peer_second.ip
-	end
+	end,
 	
 	-- remove duplicates from view
 	remove_dup = function(set)
@@ -494,18 +495,6 @@ TKELIPS = {
 		table.sort(set, function(a,b) return a.age < b.age end)
 	end,
 	
-	random_pick = function(n)
-		local result = {}
-		for i = 1,n do
-			repeat index = math.random(1,#job.nodes)
-			until (index ~= job.position)
-			local a_peer = job.nodes[index]
-			local hashed_index = compute_hash(table.concat({tostring(a_peer.ip),":",tostring(a_peer.port)}))
-			result[#result+1] = {peer=a_peer, id=hashed_index, age = 0}
-		end
-		return result	
-	end,
-	
 	precompute_aff_group = function()
 		if TKELIPS_CONVERGE then
 			for i,v in ipairs(job.nodes) do
@@ -515,7 +504,7 @@ TKELIPS = {
 				end
 			end
 		end
-end
+	end,
 	
 	--return nodes from received that belong to the affinity group ag
 	filter_ag = function(received, ag)
@@ -572,45 +561,29 @@ end
 -------------------------------------------------------------------------------
 	
 	check_convergence = function()
-		TKELIPS.check_ag_convergence()
-		TKELIPS.check_contacts_convergence()
-		log:print("# MISSING ENTRIES mandatory:"..TKELIPS.missing_mandatory.. "\toptional:"..TKELIPS.missing_optional)
-	end,
-	
-	check_ag_convergence = function()
-		local missing = 0
-		for _,v in ipairs(TKELIPS.complete_aff_group) do
-			local found = false
-			for _,w in ipairs(TKELIPS.aff_group) do
-				if TKELIPS.same_node(w,v) then
-					found = true
-					break
-				end
-			end
-			if not found then
-				TKELIPS.missing_mandatory = TKELIPS.missing_mandatory + 1
-				missing = missing + 1
-			end
-		end
-		log:print("# missing entries in affinity group view: "..missing)
+		local found_contacts = {TKELIPS.check_contacts_convergence()}
+		TKELIPS.aff_group_lock:lock()
+		local mandatory = found_contacts[1] + #TKELIPS.aff_group
+		TKELIPS.aff_group_lock:unlock()
+		local optional = found_contacts[2]
+		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. mandatory .." optional_entries:"..optional)
 	end,
 	
 	check_contacts_convergence = function()
-		local missing = 0
+		local mandatory = 0
+		local missing_optional = 0
 		for i = 0, k-1 do
 			if TKELIPS.contacts[i] then
-				for j = 0, #TKELIPS.contacts[i] do
-					if not KELIPS.contacts[i][j] then 
-						TKELIPS.missing_optional = TKELIPS.missing_optional + 1
-						missing = missing + 1
+				mandatory = mandatory + 1
+				for j = 1, TKELIPS.c do
+					if not TKELIPS.contacts[i][j] then 
+						missing_optional = missing_optional + 1
 					end
 				end
-			else
-				TKELIPS.missing_mandatory = TKELIPS.missing_mandatory + 1
-				missing = missing + TKELIPS.c
-			end
+			else missing_optional = missing_optional + TKELIPS.c-1 end
 		end
-		log:print("# missing entries in contacts: "..missing)
+		local optional = k*(TKELIPS.c-1) - missing_optional
+		return mandatory, optional
 	end,
 	
 -------------------------------------------------------------------------------
@@ -674,7 +647,7 @@ end
 	update_contacts = function(received)
 		TKELIPS.contacts_lock:lock()
 		for i,v in ipairs(received) do
-			local ag = v.id%k
+			local ag = get_ag(v)
 			local is_new = true
 			if TKELIPS.contacts[ag] == nil then
 				TKELIPS.contacts[ag] = {}
@@ -902,7 +875,7 @@ KELIPS_LOOKUP = {
 -------------------------------------------------------------------------------
 -- main loop
 -------------------------------------------------------------------------------
-max_time = 600
+max_time = 300
 
 function terminator()
   events.sleep(max_time)
@@ -916,6 +889,7 @@ function main()
 	log:print(table.concat({"ME: ", me.id, " (", me.id%k, ")"}))
 -- precompute current node affinity group for checking convergence
 	TKELIPS.precompute_aff_group()
+	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. #TKELIPS.complete_aff_group+k .." optional_entries:"..k*(TKELIPS.c-1))
 -- initialize the peer sampling service
 	PSS.pss_init()
 -- init random number generator
@@ -930,7 +904,7 @@ function main()
 	events.sleep(10)
 	TKELIPS_thread = events.periodic(GOSSIP_TIME, TKELIPS.active_thread)
 	
-	events.sleep(250)
+--	events.sleep(250)
 	
 -- test insertion and lookup
 	if KELIPS_LOOKUP_TEST then
