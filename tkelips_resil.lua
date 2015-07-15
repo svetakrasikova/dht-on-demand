@@ -523,10 +523,13 @@ TKELIPS = {
 	end,
 	
 	remove_from_ag = function(node)
+		TKELIPS.aff_group_lock:lock()
 		TKELIPS.remove_node(TKELIPS.aff_group, node)
+		TKELIPS.aff_group_lock:unlock()
 	end,
 	
 	remove_from_contacts = function(node)
+		TKELIPS.contacts_lock:lock()
 		for i = 0, k-1 do
 			if TKELIPS.contacts[i] then
 				for j = 1, TKELIPS.c do
@@ -539,6 +542,7 @@ TKELIPS = {
 				end
 			end
 		end
+		TKELIPS.contacts_lock:unlock()
 	end,
 	
 	remove_stale_nodes = function(set)
