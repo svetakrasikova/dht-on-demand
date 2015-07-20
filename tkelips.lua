@@ -37,12 +37,12 @@ end
 rpc.server(job.me.port)
 
 --size of the network
-n = tonumber(arg[2])
+n = 128
 --number of affinity groups
 k = math.floor(math.sqrt(n))
 
 --TKELIPS params
-GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 3
+GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 5
 TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 6
 TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 10
 TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 2
@@ -364,8 +364,6 @@ TKELIPS = {
 	contacts_lock = events.lock(),
 	ft_lock = events.lock(),
 	cycle = 0,
-	missing_mandatory = 0,
-	missing_optional = 0,
 	
 -------------------------------------------------------------------------------
 -- debug
@@ -635,6 +633,7 @@ TKELIPS = {
 				end
 			end
 			if is_new then new_entries[#new_entries+1] = v end
+			is_new = true
 		end
 		for i,v in ipairs(TKELIPS.aff_group) do
 			if not matched[i] then
@@ -670,7 +669,8 @@ TKELIPS = {
 				TKELIPS.keep_n(merged, TKELIPS.c)
 				TKELIPS.contacts[ag] = merged
 				TKELIPS.remove_stale_nodes(TKELIPS.contacts[ag])
-			end		
+			end
+			is_new = true
 		end
 		TKELIPS.contacts_lock:unlock()
 	end,
@@ -701,6 +701,7 @@ TKELIPS = {
 				log:print("TKELIPS active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
 				log:print("TKELIPS active thread: removing non-responding node from AG VIEW")
 				TKELIPS.remove_failed_node(partner)
+				break
 			end
 		end
 		if ok then
@@ -796,6 +797,7 @@ KELIPS_LOOKUP = {
 				ok, res = rpc.acall(partner.peer, {'KELIPS_LOOKUP.passive_thread', buffer})
 			else
 				log:print("KELIPS_LOOKUP active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
+				break
 			end
 		end
 		if ok then

@@ -63,6 +63,7 @@ TCHORD_EXPONENT = 7
 TCHORD_LEAF = tonumber(PARAMS["TCHORD_LEAF"]) or 3
 -- size of a random sample from pss to be used in TCHORD exchanges
 TCHORD_RANDOM = tonumber(PARAMS["TCHORD_RANDOM"]) or 2
+TCHORD_MESSAGE_SIZE = tonumber(PARAMS["TCHORD_MESSAGE_SIZE"]) or 10
 TCHORD_HB_TIMEOUT = tonumber(PARAMS["TCHORD_HB_TIMEOUT"]) or 300
 TCHORD_CONVERGE = PARAMS["TCHORD_CONVERGE"] or true
 
@@ -345,19 +346,22 @@ TCHORD = {
 	t = TCHORD_EXPONENT,
 	l = TCHORD_LEAF,
 	r = TCHORD_RANDOM,
+	m = TCHORD_MESSAGE_SIZE,
 	timeout = TCHORD_HB_TIMEOUT,
 	leaves_lock = events.lock(),
 	fingers_lock = events.lock(),
 	-- current cycle of the active TCHORD thread
 	cycle = 0,
+	ideal_fingers = {},
+	ideal_leaves = {},
 	
 -------------------------------------------------------------------------------
 -- debug
 -------------------------------------------------------------------------------
 	display_view = function(v, which)
- 		local display = table.concat({which," VIEW_CONTENT ",me.id,"(", me.id%2^TCHORD.t,")\t"})
+ 		local display = table.concat({which," VIEW_CONTENT ",me.id,"(", TCHORD.get_pos(me),")\t"})
 		for i,w in ipairs(v) do
-			display = table.concat({display ," ",w.id,"(",w.id%2^TCHORD.t,")"})
+			display = table.concat({display ," ",w.id,"(",TCHORD.get_pos(w),")"})
 		end
 		log:print(display)
 	end,
@@ -367,7 +371,7 @@ TCHORD = {
 		local out = table.concat({"TCHORD cycle", " ", c, " ", "APPROX. LEAVES\t"})
 		for i = 1, TCHORD.l do
 			if TCHORD.leaves[i] then
-				out = table.concat({out,"l",i," ",TCHORD.leaves[i].id,"(",TCHORD.leaves[i].id%2^TCHORD.t,")\t"})
+				out = table.concat({out,"l",i," ",TCHORD.leaves[i].id,"(",TCHORD.get_pos(TCHORD.leaves[i]),")\t"})
 			end
 		end
 		log:print(out)
@@ -377,7 +381,7 @@ TCHORD = {
 		local out = table.concat({"TCHORD cycle", " ", c, " ", "APPROX. FINGERS\t"})
 		for i = 1, TCHORD.t do
 			if TCHORD.fingers[i] then
-				out = table.concat({out,"f",(i-1)," ",TCHORD.fingers[i].id,"(",(TCHORD.fingers[i].id)%2^TCHORD.t,")\t"})
+				out = table.concat({out,"f",(i-1)," ",TCHORD.fingers[i].id,"(",TCHORD.get_pos(TCHORD.fingers[i]),")\t"})
 			end
 		end
 		log:print(out)
@@ -391,6 +395,12 @@ TCHORD = {
 -------------------------------------------------------------------------------
 -- utilities
 -------------------------------------------------------------------------------
+	get_pos = function(node)
+		local id
+		if type(node) == "table" then id = node.id else id = node end
+		return id%2^TCHORD.t
+	end,
+	
 	-- remove duplicates from view
 	remove_dup = function(set)
 		--local rd = misc.time()
@@ -424,7 +434,7 @@ TCHORD = {
 		local distances = {}
 		local ranked = {}
 		for i,v in ipairs(set) do
-			local dist = v.id%2^TCHORD.t - n.id%2^TCHORD.t 
+			local dist = TCHORD.get_pos(v) - TCHORD.get_pos(n)  
 			local d = 0
 			if dist >= 0 then d = dist
 			else d = dist + 2^TCHORD.t end
@@ -506,16 +516,17 @@ TCHORD = {
 		local ranked = TCHORD.rank(p, set)
 		TCHORD.remove_self(ranked, p)
 		for _,v in ipairs(ranked) do
-			if v.id%2^TCHORD.t ~= p.id%2^TCHORD.t then return v end
+			if TCHORD.get_pos(v) ~= TCHORD.get_pos(p) then return v end
 		end 
 	end,
 	
-	update_age_merge = function(t1,t2)
+	update_age_merge = function(received,view)
+		--print("update age merged")
 		local new_entries = {}
 		local matched = {}
 		local is_new = true
-		for i,v in ipairs(t1) do
-			for j,w in ipairs(t2) do
+		for i,v in ipairs(received) do
+			for j,w in ipairs(view) do
 				if TCHORD.same_node(w,v) then
 					TCHORD.update_age (w,v)
 					matched[j] = true
@@ -524,14 +535,18 @@ TCHORD = {
 				end
 			end
 			if is_new then new_entries[#new_entries+1] = v end
+			is_new = true
 		end
-		for i,v in ipairs(t2) do
+		for i,v in ipairs(view) do
 			if not matched[i] then
 				v.age = v.age+1
 			end
 		end
-		local merged = misc.merge(t2, new_entries)
+	
+		local merged = misc.merge(view, new_entries)
+		--TCHORD.display_view(merged, "after merge with new entries")
 		TCHORD.remove_stale_nodes(merged)
+		--TCHORD.display_view(merged, "after removing stale")
 		return merged
 	end,
 	
@@ -549,6 +564,109 @@ TCHORD = {
 	update_age  = function(n1,n2)
 		if n1.age > n2.age then n1.age = n2.age end
 	end,
+	
+-------------------------------------------------------------------------------
+-- Convergence
+-------------------------------------------------------------------------------
+	precompute_views = function()
+		if TCHORD_CONVERGE then
+			local ranked = TCHORD.rank_all_nodes ()
+			print("Precomputing leaves")
+			for i = 1, TCHORD.l do
+				TCHORD.ideal_leaves[i] = ranked[i]
+				print("Ideal leaves "..i)
+				for i,v in ipairs(ranked[i]) do
+				print(v.."("..TCHORD.get_pos(v)..")")
+				end
+			end
+			print("Precomputing fingers")
+			for i = 1, TCHORD.t do
+				TCHORD.ideal_fingers[i] = TCHORD.precompute_fingers(ranked, i)
+				print("Ideal finger "..i..": "..TCHORD.get_pos(TCHORD.ideal_fingers[i][1]))
+			end
+		end
+	end,
+	
+	--group ordered nodes by ranks
+	rank_all_nodes = function()
+		local result = {}
+		local ids = {}
+		for i,v in ipairs(job.nodes) do
+			if not TCHORD.same_node(v, me) then
+				local hashed_index = compute_hash(tostring(v.ip) ..":"..tostring(v.port))
+				ids[#ids+1] = hashed_index
+			end
+		end
+		ids = TCHORD.rank(me, ids)
+		for i,v in ipairs(ids) do
+			if #result ~= 0 then 
+				if TCHORD.get_pos(v) ~= TCHORD.get_pos(result[#result][1]) then
+					result[#result+1] = {}
+					table.insert(result[#result], v)
+				else
+					table.insert(result[#result], v)
+				end
+			else
+				result[#result+1] = {}
+				table.insert(result[#result], v)
+			end
+		end
+		return result
+	end,
+
+	precompute_fingers = function(nodes,j)
+		local f_index = (TCHORD.get_pos(me) + 2^(j-1))%2^TCHORD.t
+		local first = 0
+		for i,v in ipairs(nodes) do
+			if #v ~= 0 then first = i break end
+		end
+		local min = TCHORD.get_pos(nodes[first][1])
+		for i = first, #nodes do
+			local value = TCHORD.get_pos(nodes[i][1])
+			if value == f_index then return nodes[i] end
+			if value < min then min = value end
+			if min <= f_index and value > f_index then return nodes[i] end
+		end
+		return nodes[first]
+	end,
+	
+	check_convergence = function()
+		local leaves_entries = 0
+		local fingers_entries = 0
+		TCHORD.leaves_lock:lock()
+		for j = 1, TCHORD.l do
+			if TCHORD.leaves[j] then
+				local match_correct = false
+				for i,v in ipairs(TCHORD.ideal_leaves[j]) do
+					if TCHORD.get_pos(TCHORD.leaves[j]) == TCHORD.get_pos(v) or
+								misc.between_c(TCHORD.get_pos(TCHORD.leaves[j]), TCHORD.get_pos(me), TCHORD.get_pos(v)) or
+								TCHORD.get_pos(TCHORD.leaves[j])  == TCHORD.get_pos(me) then
+						match_correct  = true
+						break
+					end
+				end
+				if match_correct then leaves_entries = leaves_entries + 1 end
+			end
+		end
+	TCHORD.leaves_lock:unlock()
+	
+	TCHORD.fingers_lock:lock()
+		for j = 1, TCHORD.t do
+			if TCHORD.fingers[j] then
+				local match_correct = false		
+				for i,v in ipairs(TCHORD.ideal_fingers[j]) do
+					if TCHORD.get_pos(TCHORD.fingers[j]) == TCHORD.get_pos(v) then
+						match_correct = true
+						break
+					end
+				end
+				if match_correct then fingers_entries = fingers_entries + 1 end
+			end
+		end
+		TCHORD.fingers_lock:unlock()	
+		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. leaves_entries .." optional_entries:"..fingers_entries)
+	end,
+
 
 -------------------------------------------------------------------------------
 -- T-Chord
@@ -566,7 +684,8 @@ TCHORD = {
 
 	select_peer = function()
 		--local sp = misc.time()
-		local partner = TCHORD.leaves[math.random(TCHORD.l)]
+		--local partner = TCHORD.leaves[math.random(TCHORD.l)]
+		local partner = PSS.pss_getPeer()
 		--log:print("TCHORD.select_peer", misc.time() - sp, "peer id", partner.id%2^TCHORD.t)
 		return partner
 		end,
@@ -574,7 +693,7 @@ TCHORD = {
 	create_message = function(partner)	
 		--local cm = misc.time()
 		PSS.view_copy_lock:lock()		
-		local pss_buffer = misc.random_pick(PSS.view_copy, TCHORD.r)
+		local pss_buffer = misc.dup(PSS.view_copy)
 		PSS.view_copy_lock:unlock()
 		TCHORD.leaves_lock:lock()
 		local merged =  misc.merge(TCHORD.leaves, pss_buffer)
@@ -584,8 +703,8 @@ TCHORD = {
 		merged[#merged+1] = me
 		TCHORD.remove_dup(merged)
 		merged = TCHORD.rank(partner, merged)
-	--keep the first l nodes in the message
-		TCHORD.keep_n(merged,TCHORD.l)
+	--keep the first m nodes in the message
+		TCHORD.keep_n(merged,TCHORD.m)
 		--log:print("TCHORD.create_message", misc.time() - cm)
 		return merged	
 	end,
@@ -648,6 +767,7 @@ TCHORD = {
 				log:print("TCHORD active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
 				log:print("TKELIPS active thread: removing non-responding node from AG VIEW")
 				TCHORD.remove_failed_node(partner)
+				break
 			end
 		end
 		if ok then
@@ -657,6 +777,7 @@ TCHORD = {
 			TCHORD.update_leaf_set(received)
 			TCHORD.update_routing_table(received)
 			TCHORD.debug(loc_cycle)
+			TCHORD.check_convergence()
 		end
 	end,
 	
@@ -676,7 +797,9 @@ function main()
 -- this thread will be in charge of killing the node after max_time seconds
 	events.thread(terminator)
 	log:print("UP: "..job.me.ip..":"..job.me.port)
-	log:print(table.concat({"ME: ", me.id, " (", me.id%2^TCHORD.t, ")"}))
+	log:print(table.concat({"ME: ", me.id, " (", TCHORD.get_pos(me), ")"}))
+	TCHORD.precompute_views()
+	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. TCHORD.l.." optional_entries:"..TCHORD.t)
 -- initialize the peer sampling service
 	PSS.pss_init()
 -- init random number generator
