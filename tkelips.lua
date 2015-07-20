@@ -357,7 +357,6 @@ TKELIPS = {
 	contacts = {},
 	filetuples = {},
 	c = TKELIPS_CONTACT_SIZE,
-	--r = TKELIPS_RANDOM,
 	m = TKELIPS_MESSAGE_SIZE,
 	timeout = TKELIPS_HB_TIMEOUT,
 	aff_group_lock = events.lock(),

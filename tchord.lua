@@ -62,7 +62,6 @@ TCHORD_EXPONENT = 7
 --size of leaf set
 TCHORD_LEAF = tonumber(PARAMS["TCHORD_LEAF"]) or 3
 -- size of a random sample from pss to be used in TCHORD exchanges
-TCHORD_RANDOM = tonumber(PARAMS["TCHORD_RANDOM"]) or 2
 TCHORD_MESSAGE_SIZE = tonumber(PARAMS["TCHORD_MESSAGE_SIZE"]) or 10
 TCHORD_HB_TIMEOUT = tonumber(PARAMS["TCHORD_HB_TIMEOUT"]) or 300
 TCHORD_CONVERGE = PARAMS["TCHORD_CONVERGE"] or true
@@ -345,7 +344,6 @@ TCHORD = {
 	fingers = {},
 	t = TCHORD_EXPONENT,
 	l = TCHORD_LEAF,
-	r = TCHORD_RANDOM,
 	m = TCHORD_MESSAGE_SIZE,
 	timeout = TCHORD_HB_TIMEOUT,
 	leaves_lock = events.lock(),
