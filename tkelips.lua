@@ -715,7 +715,7 @@ TKELIPS = {
 					TKELIPS.update_aff_group(received)
 					TKELIPS.update_contacts(received)
 					TKELIPS.check_convergence()
-					TKELIPS.debug(loc_cycle)
+					--TKELIPS.debug(loc_cycle)
 				end		
 		end
 		--TKELIPS.ongoing_rpc = false

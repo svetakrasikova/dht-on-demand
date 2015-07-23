@@ -420,10 +420,12 @@ TCHORD = {
 			table.remove(t,i)
 		end
 	end,
-
-	remove_self = function(set, partner)
-		for i,v in ipairs(set) do
-			if v.peer.port == partner.peer.port and v.peer.ip == partner.peer.ip then table.remove(set, i) end
+	
+	remove_self  = function(t, node)
+		local j = 1
+		for i = 1, #t do
+			if TCHORD.same_node(t[j],node) then table.remove(t, j)
+			else j = j+1 end
 		end
 	end,
 
@@ -763,7 +765,7 @@ TCHORD = {
 				ok, res = rpc.acall(partner.peer, {'TCHORD.passive_thread', buffer, me})
 			else
 				log:print("TCHORD active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
-				log:print("TKELIPS active thread: removing non-responding node from AG VIEW")
+				log:print("TKELIPS active thread: removing non-responding node from VIEW")
 				TCHORD.remove_failed_node(partner)
 				break
 			end
@@ -801,18 +803,19 @@ function main()
 -- initialize the peer sampling service
 	PSS.pss_init()
 -- init random number generator
--- init random number generator
 	math.randomseed(job.position*os.time())
 -- wait for all nodes to start up (conservative)
 	events.sleep(2)
 -- desynchronize the nodes
 	local desync_wait = (GOSSIP_TIME * math.random())
 	log:print("waiting for "..desync_wait.." to desynchronize")
-	events.sleep(desync_wait) 
+	events.sleep(desync_wait)
+	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
+	events.sleep(10)
 --initializing the leaf set
 	TCHORD.init() 
 --launching TCHORD
-	tchord_thread = events.periodic(GOSSIP_TIME, TCHORD.active_thread)
+	TCHORD_thread = events.periodic(GOSSIP_TIME, TCHORD.active_thread)
 		
 end  
 
