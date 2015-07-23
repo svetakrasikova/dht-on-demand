@@ -38,17 +38,6 @@ end
 rpc.server(job.me.port)
 
 -------------------------------------------------------------------------------
--- current node
--------------------------------------------------------------------------------
-
-me = {}
-me.peer = job.me
-me.age = 0
-function compute_id(o) return string.sub(crypto.evp.new("sha1"):digest(o), 1, bits / 4) end
-me.id = compute_id(job.me.ip..job.me.port)
-log:print("ME: "..me.id.." "..job.me.ip..":"..job.me.port)
-
--------------------------------------------------------------------------------
 -- parameters
 -------------------------------------------------------------------------------
 
@@ -64,8 +53,8 @@ actions = 0
 
 --T-Pastry params
 GOSSIP_TIME = tonumber(PARAMS["GOSSIP_TIME"]) or 5
-TPASTRY_HB_TIMEOUT = tonumber(PARAMS["TCHORD_HB_TIMEOUT"]) or 300
-TPASTRY_CONVERGE = PARAMS["TCHORD_CONVERGE"] or true
+TPASTRY_HB_TIMEOUT = tonumber(PARAMS["TPASTRY_HB_TIMEOUT"]) or 300
+TPASTRY_CONVERGE = PARAMS["PASTRY_CONVERGE"] or true
 TPASTRY_RANDOM = tonumber(PARAMS["TPASTRY_RANDOM"]) or 6
 
 b, leaf_size, bits = 4, 16, 128
@@ -78,6 +67,19 @@ if b ~= 4 then
 	print("b must be 4, because base 16 (hexadecimal) is needed in one function.")
 	os.exit()
 end
+
+-------------------------------------------------------------------------------
+-- current node
+-------------------------------------------------------------------------------
+
+me = {}
+me.peer = job.me
+me.age = 0
+function compute_id(o) return string.sub(crypto.evp.new("sha1"):digest(o), 1, bits / 4) end
+me.id = compute_id(job.me.ip..job.me.port)
+log:print("ME: "..me.id.." "..job.me.ip..":"..job.me.port)
+
+
 
 -- ############################################################################
 -- 	Peer Sampling Service
@@ -323,7 +325,7 @@ PSS = {
 		local selected_indexes = misc.random_pick(indexes,math.min(PSS.c,#indexes))	
 		for _,v in ipairs(selected_indexes) do
 				local a_peer = job.nodes[v]
-				local hashed_index = compute_hash(tostring(a_peer.ip) ..":"..tostring(a_peer.port))
+				local hashed_index = compute_id(a_peer.ip..a_peer.port)
 		 		PSS.view[#PSS.view+1] = 
 				{peer=a_peer,age=math.random(PSS.c),id=hashed_index}
 		end
@@ -347,11 +349,16 @@ PSS = {
 
 TPASTRY = {
 	r = TPASTRY_RANDOM,
+	timeout = TPASTRY_HB_TIMEOUT,
 	leaves_decreasing = {},
 	leaves_increasing = {},
 	routing_table = {},
 	leaves_lock = events.lock(),
 	rt_lock = events.lock(),
+	ideal_leaves_increasing = {},
+	ideal_leaves_decreasing = {},
+	ideal_routing_table = {},
+	opt_entries = 0,
 	cycle = 0,
 	
 -------------------------------------------------------------------------------
@@ -361,7 +368,7 @@ TPASTRY = {
 	display_view = function(v, which)
  		local display = table.concat({which," CONTENT for nodeID ",TPASTRY.num(me),": \t"})
 		for i,w in ipairs(v) do
-			display = table.concat({display," ",TPASTRY.num(w)})
+			display = table.concat({display," ", w.id})
 		end
 		log:print(display)
 	end,
@@ -476,31 +483,196 @@ TPASTRY = {
 			table.remove(t,i)
 		end
 	end,
-
-	remove_self = function(set, partner)
-		for i,v in ipairs(set) do
-			if v.peer.port == partner.peer.port and v.peer.ip == partner.peer.ip then table.remove(set, i) end
+	
+	remove_self = function(t, node)
+		local j = 1
+		for i = 1, #t do
+			if TPASTRY.same_node(t[j],node) then table.remove(t, j)
+			else j = j+1 end
 		end
 	end,
 	
-	random_pick = function(n)
-		local result = {}
-		for i = 1,n do
-			repeat index = math.random(1,#job.get_live_nodes())
-			until (index ~= job.position)
-			local a_peer = job.get_live_nodes()[index]
-			local hashed_index = compute_id(a_peer.ip..a_peer.port)
-			result[#result+1] = {peer=a_peer, id=hashed_index}
-		end
-		return result	
+	same_node = function(n1,n2)
+		local peer_first
+		if n1.peer then peer_first = n1.peer else peer_first = n1 end
+		local peer_second
+		if n2.peer then peer_second = n2.peer else peer_second = n2 end
+		return peer_first.port == peer_second.port and peer_first.ip == peer_second.ip
 	end,
+	
+	remove_failed_node = function(node)
+	
+		TPASTRY.leaves_lock:lock()
+		TPASTRY.remove_node(TPASTRY.leaves_decreasing, node)
+		TPASTRY.remove_node(TPASTRY.leaves_increasing, node)
+		TPASTRY.leaves_lock:lock()
+		
+		TPASTRY.rt_lock:lock()
+		TPASTRY.remove_node(TPASTRY.routing_table, node)
+		TPASTRY.rt_lock:unlock()
+		
+	end, 
+	
+	remove_node = function(set, node)
+		for i,v in ipairs(set) do
+			if TPASTRY.same_node(v, node) then
+				table.remove(set, i)
+				break
+			end
+		end
+	end,
+	
+	update_age_merge = function(received,view)
+		TPASTRY.remove_dup(view)
+		local new_entries = {}
+		local matched = {}
+		local is_new = true
+		for i,v in ipairs(received) do
+			for j,w in ipairs(view) do
+				if TPASTRY.same_node(w,v) then
+					TPASTRY.update_age (w,v)
+					matched[j] = true
+					is_new = false
+					break
+				end
+			end
+			if is_new then new_entries[#new_entries+1] = v end
+			is_new = true
+		end
+		for i,v in ipairs(view) do
+			if not matched[i] then
+				v.age = v.age+1
+			end
+		end
+		local merged = misc.merge(view, new_entries)
+		TPASTRY.remove_stale_nodes(merged)
+		return merged
+	end,
+	
+	remove_stale_nodes = function(set)
+		for i,v in ipairs(set) do
+			if TPASTRY.is_stale(v) then table.remove(set, i) end
+		end
+	end,
+	
+	is_stale = function(node)
+		if  node.age >= TPASTRY.timeout then return true
+		else return false end
+	end,
+	
+	update_age  = function(n1,n2)
+		if n1.age > n2.age then n1.age = n2.age end
+	end,
+	
+-------------------------------------------------------------------------------
+-- Convergence
+-------------------------------------------------------------------------------
+	hash_all = function()
+		local ids = {}
+		for i,v in ipairs(job.nodes) do
+			if not TPASTRY.same_node(v,me) then ids[#ids+1] = compute_id(v.ip..v.port) end
+		end
+		return ids
+	end,
+
+	precompute_leaves = function(ids)
+		TPASTRY.ideal_leaves_increasing, TPASTRY.ideal_leaves_decreasing = TPASTRY.split_succ_pred(ids, me)
+		TPASTRY.rank(TPASTRY.ideal_leaves_increasing,me)
+		TPASTRY.keep_n(TPASTRY.ideal_leaves_increasing,leaf_size/2)
+		TPASTRY.rank(TPASTRY.ideal_leaves_decreasing,me)
+		TPASTRY.keep_n(TPASTRY.ideal_leaves_decreasing,leaf_size/2)
+	end,
+	
+	precompute_routing_table = function(ids)
+		local entries = 0
+		for i = 0, key_size - 1 do
+			TPASTRY.ideal_routing_table[i] = {}
+		end
+		for i,v in ipairs(ids) do
+			local row, col = TPASTRY.row_col(v)
+			if row and col then
+				if TPASTRY.ideal_routing_table[row][col] then --column is not empty
+					table.insert(TPASTRY.ideal_routing_table[row][col], v)
+				else
+					TPASTRY.ideal_routing_table[row][col] = {}
+					table.insert(TPASTRY.ideal_routing_table[row][col], v)
+					entries = entries + 1
+				end
+			end
+		end
+		return entries
+	end,
+	
+	precompute_views = function() 
+		if TPASTRY_CONVERGE then
+			local ids = TPASTRY.hash_all()
+			TPASTRY.precompute_leaves(ids)
+			return TPASTRY.precompute_routing_table(ids)
+		end
+	end,
+		
+	check_convergence = function()
+		local errors_rt, errors_l = 0,0
+	--check prefix table
+		TPASTRY.rt_lock:lock()
+		for i = 0, #TPASTRY.routing_table do
+			for j = 0, 2^b do
+				if not TPASTRY.routing_table[i][j] then
+						if TPASTRY.ideal_routing_table[i][j] then
+							errors_rt = errors_rt+1 
+						end
+				else --the row/col in rt is not empty
+					local correct = false
+					if TPASTRY.ideal_routing_table[i][j] then 				
+						for k = 1, #TPASTRY.ideal_routing_table[i][j] do
+							if TPASTRY.routing_table[i][j].id == TPASTRY.ideal_routing_table[i][j][k]	 then
+								correct = true
+								break
+							end
+						end
+						if not correct then errors_rt = errors_rt+1 end
+					end
+				end
+			end
+		end
+		TPASTRY.rt_lock:unlock()
+		
+	--check leaf sets
+		TPASTRY.leaves_lock:lock()
+		for i = 1, leaf_size/2 do
+			if TPASTRY.leaves_decreasing[i] then
+				if TPASTRY.leaves_decreasing[i].id ~= TPASTRY.ideal_leaves_decreasing[i] then errors_l = errors_l + 1 end
+			else errors_l = errors_l + 1 end
+			if TPASTRY.leaves_increasing[i] then
+				if TPASTRY.leaves_increasing[i].id ~= TPASTRY.ideal_leaves_increasing[i] then errors_l = errors_l + 1 end
+			else errors_l = errors_l + 1 end		 
+		end
+		TPASTRY.leaves_lock:unlock()
+		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. leaf_size-errors_l .." optional_entries:"..TPASTRY.opt_entries-errors_rt)
+	end,
+	
+	display_ideal_rt = function()
+	for i = 0, #TPASTRY.ideal_routing_table do
+		print("row", i)
+		for j,w in pairs(TPASTRY.ideal_routing_table[i]) do
+			print ("\tcolumn", j)
+			local out = ""
+				for k,x in pairs(w) do 
+					out = out.." "..x
+				end
+			print("\t\t"..out)	
+		end
+	end
+end,
+
+
 	
 -------------------------------------------------------------------------------
 -- T-Pastry
 -------------------------------------------------------------------------------
 	
 	--initialises leaf sets with leaf_size/2 random nodes from pss each
-	TPASTRY_init = function()
+	init = function()
 		for i = 0, key_size - 1 do TPASTRY.routing_table[i] = {} end
 		PSS.view_copy_lock:lock()
 		TPASTRY.leaves_decreasing = misc.random_pick(PSS.view_copy, leaf_size/2)
@@ -509,19 +681,20 @@ TPASTRY = {
 	end,
 
 
-	selectPeer = function()
-		TPASTRY.leaves_lock:lock()
-		local merged = misc.merge(TPASTRY.leaves_decreasing, TPASTRY.leaves_increasing)
-		TPASTRY.leaves_lock:unlock()
-		TPASTRY.rank(merged,me)
-		return merged[math.random(#merged/2)]
+	select_peer = function()
+--		TPASTRY.leaves_lock:lock()
+--		local merged = misc.merge(TPASTRY.leaves_decreasing, TPASTRY.leaves_increasing)
+--		TPASTRY.leaves_lock:unlock()
+--		TPASTRY.rank(merged,me)
+--		return merged[math.random(#merged/2)]
+		return PSS.pss_getPeer()
 	end,
 
-	createMessage = function(partner)
+	create_message = function(partner)
 		-- merge leaf sets with self
 		TPASTRY.leaves_lock:lock()
 		local merged = misc.merge(TPASTRY.leaves_decreasing, TPASTRY.leaves_increasing)
-		TPASTRY.leaves_lock:lock()
+		TPASTRY.leaves_lock:unlock()
 		merged[#merged+1] = me
 		--  add r random nodes from pss
 		PSS.view_copy_lock:lock()
@@ -536,12 +709,11 @@ TPASTRY = {
 		return merged	
 	end,
  
-	updateLeafSet = function(received)
+	update_leaf_set = function(received)
 		TPASTRY.leaves_lock:lock()
 	-- merge leaf sets with the received message and sort according to the distance to self on the ring
-		local merged = misc.merge(TPASTRY.leaves_decreasing, TPASTRY.leaves_increasing, received)
-	--remove duplicates	
-		TPASTRY.remove_dup(merged)
+		local merged = misc.merge(TPASTRY.leaves_decreasing, TPASTRY.leaves_increasing)
+		merged = TPASTRY.update_age_merge(received, merged)
 		TPASTRY.rank(merged,me)
 	-- split into successors and predecessors of self on the ring
 		local succ, pred = TPASTRY.split_succ_pred(merged,me)
@@ -571,37 +743,57 @@ TPASTRY = {
 	end,
 
 	-- fills in any missing table entries by the nodes from the received message
-	updatePrefixTable = function(received)
+	update_prefix_table = function(received)
+		local matched = {}
+		for i = 0, #TPASTRY.routing_table do
+			matched[i] = {}
+		end
 		TPASTRY.rt_lock:lock()
 		for i,v in ipairs(received) do
 			local row, col = TPASTRY.row_col(v.id)
 			if TPASTRY.routing_table[row] then
-				if not TPASTRY.routing_table[row][col] then table.insert(TPASTRY.routing_table[row], col, v) end
+				if not TPASTRY.routing_table[row][col] then
+					TPASTRY.routing_table[row][col] = v				
+				else
+					if TPASTRY.routing_table[row][col].id == v.id then
+						matched[row][col] = true
+						TPASTRY.update_age(TPASTRY.routing_table[row][col],v)
+					end
+				end
+			end
+		end
+		for i = 0, #TPASTRY.routing_table do
+			for j = 0, 2^b do
+				if TPASTRY.routing_table[i][j] and (not matched[i][j]) then
+					TPASTRY.routing_table[i][j].age = TPASTRY.routing_table[i][j].age  + 1
+				end
 			end
 		end
 		TPASTRY.rt_lock:unlock()
 	end,
 
-	passiveThread = function(received,sender)
-		local buffer = TPASTRY.createMessage(sender)
-		TPASTRY.updateLeafSet(received)
-		TPASTRY.updatePrefixTable(received)
+	passive_thread = function(received,sender)
+		local buffer = TPASTRY.create_message(sender)
+		TPASTRY.update_leaf_set(received)
+		TPASTRY.update_prefix_table(received)
 		return buffer
 	end,
 
-	activeThread = function()
-		local partner = TPASTRY.selectPeer()
-		local buffer = TPASTRY.createMessage(partner)
+	active_thread = function()
+		local partner = TPASTRY.select_peer()
+		local buffer = TPASTRY.create_message(partner)
 		local try = 0
-		local ok, res = rpc.acall(partner.peer, {'TPASTRY.passiveThread', buffer, me})
+		local ok, res = rpc.acall(partner.peer, {'TPASTRY.passive_thread', buffer, me})
 		while not ok do
 			try = try + 1
 			if try <= 3 then
 				log:print("T-Pastry active thread: no response from:"..partner.id.. ": "..tostring(res).." => try again")
 				events.sleep(math.random(try * 30, try * 60))
-				ok, res = rpc.acall(partner.peer, {'TPASTRY.passiveThread', buffer, me})
+				ok, res = rpc.acall(partner.peer, {'TPASTRY.passive_thread', buffer, me})
 			else
 				log:print("T-Pastry active thread: no response from:"..partner.id..": "..tostring(res).."  => end")
+				log:print("TPASTRY active thread: removing non-responding node from VIEW")
+				TPASTRY.remove_failed_node(partner)
 				break
 			end
 		end
@@ -609,14 +801,15 @@ TPASTRY = {
 			local received = res[1]
 			local loc_cycle = TPASTRY.cycle +1
 			TPASTRY.cycle = TPASTRY.cycle + 1
-			TPASTRY.updateLeafSet(received)	
-			TPASTRY.updatePrefixTable(received)
+			TPASTRY.update_leaf_set(received)
+			TPASTRY.update_prefix_table(received)
 			TPASTRY.debug(loc_cycle)
+			TPASTRY.display_ideal_rt()
+			TPASTRY.check_convergence()
 		end
 	end,
 
 }
-
 
 -------------------------------------------------------------------------------
 -- Main loop
@@ -629,7 +822,10 @@ end
 function main()
 -- this thread will be in charge of killing the node after max_time seconds
 	events.thread(terminator)
-	log:print("UP: "..job.me.ip..":"..job.me.port)
+	TPASTRY.opt_entries = TPASTRY.precompute_views()
+	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. leaf_size.." optional_entries:"..TPASTRY.opt_entries)
+	-- initialize the peer sampling service
+	PSS.pss_init()
 -- init random number generator
 	math.randomseed(job.position*os.time())
 -- wait for all nodes to start up (conservative)
@@ -638,9 +834,10 @@ function main()
 	local desync_wait = (GOSSIP_TIME * math.random())
   	log:print("waiting for "..desync_wait.." to desynchronize")
 	events.sleep(desync_wait)   
-
-	TPASTRY.TPASTRY_init()
-	t2 = events.periodic(GOSSIP_TIME, TPASTRY.activeThread)
+	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
+	events.sleep(10)
+	TPASTRY.init()
+	tpastry_thread = events.periodic(GOSSIP_TIME, TPASTRY.active_thread)
 	
 end
 
