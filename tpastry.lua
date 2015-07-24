@@ -505,7 +505,7 @@ TPASTRY = {
 		TPASTRY.leaves_lock:lock()
 		TPASTRY.remove_node(TPASTRY.leaves_decreasing, node)
 		TPASTRY.remove_node(TPASTRY.leaves_increasing, node)
-		TPASTRY.leaves_lock:lock()
+		TPASTRY.leaves_lock:unlock()
 		
 		TPASTRY.rt_lock:lock()
 		TPASTRY.remove_node(TPASTRY.routing_table, node)
@@ -704,12 +704,13 @@ end,
 		TPASTRY.remove_dup(merged)
 		--sort according to the distance to the partner
 		TPASTRY.rank(merged,partner)
-	-- keep the first leaf_size entries
-		if #merged > leaf_size then TPASTRY.keep_n(merged, leaf_size) end
+		-- keep the first leaf_size entries
+		--if #merged > leaf_size then TPASTRY.keep_n(merged, leaf_size) end
 		return merged	
 	end,
  
 	update_leaf_set = function(received)
+		local uls = misc.time()
 		TPASTRY.leaves_lock:lock()
 	-- merge leaf sets with the received message and sort according to the distance to self on the ring
 		local merged = misc.merge(TPASTRY.leaves_decreasing, TPASTRY.leaves_increasing)
@@ -740,10 +741,12 @@ end,
 			TPASTRY.leaves_increasing = succ
 		end
 		TPASTRY.leaves_lock:unlock()
+		print("update leaf set", misc.time()-uls)
 	end,
 
 	-- fills in any missing table entries by the nodes from the received message
 	update_prefix_table = function(received)
+		local upt = misc.time()
 		local matched = {}
 		for i = 0, #TPASTRY.routing_table do
 			matched[i] = {}
@@ -770,6 +773,7 @@ end,
 			end
 		end
 		TPASTRY.rt_lock:unlock()
+		print("update prefix table", misc.time()-upt)
 	end,
 
 	passive_thread = function(received,sender)
@@ -803,8 +807,8 @@ end,
 			TPASTRY.cycle = TPASTRY.cycle + 1
 			TPASTRY.update_leaf_set(received)
 			TPASTRY.update_prefix_table(received)
-			TPASTRY.debug(loc_cycle)
-			TPASTRY.display_ideal_rt()
+			--TPASTRY.debug(loc_cycle)
+			--TPASTRY.display_ideal_rt()
 			TPASTRY.check_convergence()
 		end
 	end,
@@ -822,10 +826,6 @@ end
 function main()
 -- this thread will be in charge of killing the node after max_time seconds
 	events.thread(terminator)
-	TPASTRY.opt_entries = TPASTRY.precompute_views()
-	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. leaf_size.." optional_entries:"..TPASTRY.opt_entries)
-	-- initialize the peer sampling service
-	PSS.pss_init()
 -- init random number generator
 	math.randomseed(job.position*os.time())
 -- wait for all nodes to start up (conservative)
@@ -833,7 +833,11 @@ function main()
 -- desynchronize the nodes
 	local desync_wait = (GOSSIP_TIME * math.random())
   	log:print("waiting for "..desync_wait.." to desynchronize")
-	events.sleep(desync_wait)   
+	events.sleep(desync_wait)
+		TPASTRY.opt_entries = TPASTRY.precompute_views()
+	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. leaf_size.." optional_entries:"..TPASTRY.opt_entries)
+	-- initialize the peer sampling service
+	PSS.pss_init()
 	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
 	events.sleep(10)
 	TPASTRY.init()

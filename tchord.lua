@@ -464,7 +464,7 @@ TCHORD = {
 	
 		TCHORD.leaves_lock:lock()
 		TCHORD.remove_node(TCHORD.leaves, node)
-		TCHORD.leaves_lock:lock()
+		TCHORD.leaves_lock:unlock()
 		
 		TCHORD.fingers_lock:lock()
 		TCHORD.remove_node(TCHORD.fingers, node)
