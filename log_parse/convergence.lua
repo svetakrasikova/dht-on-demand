@@ -1,6 +1,6 @@
 --[[
 
-counting the number of mandatory and optional entries in TKELIPS affinity group views and contacts per time interval
+Counting the number of mandatory and optional entries in views per second
 
 ]]--
 
