@@ -53,7 +53,7 @@ function num(k)
 end
 
 -------------------------------------------------------------------------------
--- operations on bits
+-- bitwise operations (from LuaBit v0.4)
 -------------------------------------------------------------------------------
 
 local function check_int(n)
@@ -234,11 +234,12 @@ end
 -------------------------------------------------------------------------------
 --T-KAD params
 --size of TKAD message
-TKAD_MESSAGE = tonumber(PARAMS["TKAD_MESSAGE"]) or 10
-TKAD_VIEW = tonumber(PARAMS["TKAD_VIEW"]) or 16
-GOSSIP_TIME = tonumber(PARAMS["GOSSIP_TIME"]) or 7
+TKAD_MESSAGE = tonumber(PARAMS["TKAD_MESSAGE"]) or 6
+TKAD_VIEW = tonumber(PARAMS["TKAD_VIEW"]) or 10
+GOSSIP_TIME = tonumber(PARAMS["GOSSIP_TIME"]) or 10
 K_SIZE = tonumber(PARAMS["K_SIZE"]) or 3
 TKAD_RANDOM = tonumber(PARAMS["TKAD_RANDOM"]) or 5
+TKAD_CONVERGE = PARAMS["TKAD_CONVERGE"] or true
 
 --PSS params
 PSS_VIEW_SIZE =tonumber(PARAMS["PSS_VIEW_SIZE"]) or 10
@@ -516,7 +517,6 @@ PSS = {
 TKAD = {
 	view = {},
 	routing_table = {},
-	t = TKAD_EXPONENT,
 	v = TKAD_VIEW,
 	r = TKAD_RANDOM,
 	k = K_SIZE,
@@ -524,6 +524,7 @@ TKAD = {
 	view_lock = events.lock(),
 	rt_lock = events.lock(),
 	cycle = 0,
+	ideal_rt = {},
 
 -------------------------------------------------------------------------------
 -- debug
@@ -680,7 +681,75 @@ TKAD = {
 			end
 		end
 	end,
+	
+-------------------------------------------------------------------------------
+-- Convergence
+-------------------------------------------------------------------------------
 
+	hash_all = function()
+		local ids = {}
+		for i,v in ipairs(job.nodes) do
+			if not TKAD.same_node(v,me) then
+				local hashed_index = compute_id(v.ip..v.port)
+				ids[#ids+1] = hashed_index
+			end
+		end
+		return ids
+	end,
+
+
+	precompute_routing_table = function()
+		local num, entries = 0,{}
+		if TKAD_CONVERGE then 
+			for i = 0, bits do TKAD.ideal_rt[i] = {} end
+			local ids = TKAD.hash_all()
+			for i,v in ipairs(ids) do
+				local buck = TKAD.bucket_num(v)
+				if entries[buck] then entries[buck] = entries[buck]+1
+				else entries[buck] = 1 end
+				--print(v.id, TKAD.bit_out(v), buck) 
+				table.insert(TKAD.ideal_rt[buck], v)		
+			end
+		end
+		
+		for i,v in pairs(entries) do
+			if v > 3 then num = num + 3 else num = num + v end
+		end
+		log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. 0 .." optional_entries:"..num)
+	end,
+	
+	
+	display_ideal_rt = function()
+		log:print("IDEAL ROUTING TABLE:", num(me.id))
+		for i = 0, bits do
+			if TKAD.ideal_rt[i] and #TKAD.ideal_rt[i] > 0 then
+				local out = ""
+				for j,v in ipairs(TKAD.ideal_rt[i]) do
+					out = out..num(v).." | "
+				end
+				log:print(i, out)
+			end
+		end
+	end,
+
+	check_convergence = function()
+		local entries = 0
+		for i = 0, #TKAD.routing_table do
+			if TKAD.routing_table[i] and #TKAD.routing_table[i]>0 then
+				for j,k in ipairs(TKAD.routing_table[i]) do
+					local correct = false
+					for l,m in ipairs(TKAD.ideal_rt[i]) do
+						if num(k) == num(m) then
+							correct = true
+							break
+						end
+					end
+					if correct then entries = entries + 1 end
+				end
+			end
+		end
+		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. 0 .." optional_entries:"..entries)
+	end,
 -------------------------------------------------------------------------------
 -- T-KAD
 -------------------------------------------------------------------------------
@@ -697,12 +766,12 @@ TKAD = {
 
 	-- ranks TKAD view according to xor_diff from self and selects a random node from the first m nodes
 	select_peer = function()
-		log:print("Starting TKAD.select_peer")
+		--log:print("Starting TKAD.select_peer")
 		local sp = misc.time()
 		if #TKAD.view > TKAD.m then
-			TKAD.xor_rank(TKAD.view, me)
-			--TKAD.xor_rank_pure(TKAD.view, me)
-			log:print("TKAD.select_peer", misc.time()-sp)
+			--TKAD.xor_rank(TKAD.view, me)
+			TKAD.xor_rank_pure(TKAD.view, me)
+			--log:print("TKAD.select_peer", misc.time()-sp)
 			return TKAD.view[math.random(TKAD.m)]
 		else return TKAD.view[math.random(1,#TKAD.view)] end
 		--return PSS.pss_getPeer()
@@ -711,14 +780,14 @@ TKAD = {
 	-- creates TKAD message: rank TKAD view by the xor_diff from the partner,
 	-- select the highest ranked nodes for the message
 	create_message = function(partner)
-		log:print("Starting TKAD.create_message")
+		--log:print("Starting TKAD.create_message")
 		local cm = misc.time()
 		local buffer = misc.dup(TKAD.view)
 		buffer[#buffer+1] = me
 		TKAD.remove_dup(buffer)
 		TKAD.remove_self(buffer, partner)
-		--TKAD.xor_rank_pure(buffer, partner)
-		TKAD.xor_rank(buffer, partner)
+		TKAD.xor_rank_pure(buffer, partner)
+		--TKAD.xor_rank(buffer, partner)
 		if #buffer > TKAD.m then TKAD.keep_n(buffer,TKAD.m) end
 		log:print("TKAD.create_message", misc.time()-cm)
 		return buffer
@@ -726,7 +795,7 @@ TKAD = {
 
 	--merges TKAD view with the received message
 	update_view = function(received)
-		log:print("Starting TKAD.update_view")	
+		--log:print("Starting TKAD.update_view")	
 		local uv = misc.time()
 		TKAD.view_lock:lock()
 		TKAD.view = misc.merge(TKAD.view, received)
@@ -734,12 +803,12 @@ TKAD = {
 		TKAD.xor_rank(TKAD.view,me)
 		TKAD.keep_n(TKAD.view, TKAD.v)
 		TKAD.view_lock:unlock()
-		log:print("TKAD.update_view", misc.time()-uv)
+		--log:print("TKAD.update_view", misc.time()-uv)
 	end,
 
 	-- add nodes from the received to the corresponding k-buckets
 	update_prefix_table = function(received)
-		log:print("Starting TKAD.update_prefix_table")
+		--log:print("Starting TKAD.update_prefix_table")
 		local upt = misc.time()
 		TKAD.rt_lock:lock()
 		for i,v in ipairs(received) do
@@ -765,7 +834,7 @@ TKAD = {
 			end
 		end
 		TKAD.rt_lock:unlock()
-		log:print("TKAD.update_prefix_table", misc.time()-upt)
+		--log:print("TKAD.update_prefix_table", misc.time()-upt)
 	end,
 
 	passive_thread = function(received,sender)
@@ -799,7 +868,8 @@ TKAD = {
 			TKAD.cycle = TKAD.cycle + 1
 			TKAD.update_view(received)
 			TKAD.update_prefix_table(received)
-			TKAD.debug(loc_cycle,true)
+			--TKAD.debug(loc_cycle,true)
+			TKAD.check_convergence()
 		end
 	end,
 	
@@ -826,11 +896,14 @@ function main()
   	events.sleep(2)
 -- desynchronize the nodes
 	local desync_wait = (GOSSIP_TIME * math.random())
-  	log:print("waiting for "..desync_wait.." to desynchronize")
-	events.sleep(desync_wait)   
+  log:print("waiting for "..desync_wait.." to desynchronize")
+	events.sleep(desync_wait)
 	PSS.pss_init()
-	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
+	events.sleep(5)
+	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread)
+	TKAD.precompute_routing_table()
 	events.sleep(10)
+	
 	TKAD.init()
 	TKAD_thread = events.periodic(GOSSIP_TIME, TKAD.active_thread)
 end
