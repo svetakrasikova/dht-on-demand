@@ -1,16 +1,27 @@
---counting the number of mandatory and optional entries in TKELIPS affinity group views and contacts per time interval
---usage: <log.txt> <output.txt> <num_nodes>
+--[[
+
+counting the number of mandatory and optional entries in TKELIPS affinity group views and contacts per time interval
+
+]]--
+
 misc = require"splay.misc"
 
-io.input(arg[1])
-io.output(arg[2])
+if #arg < 3 then
+    print("Usage:lua convergence.lua <log.txt> <output.txt> <num_nodes>")
+    os.exit()
+else
+    io.input(arg[1])
+		io.output(arg[2])
+		num_nodes = tonumber(arg[3])
+end
+
 
 function timeInSec(h,m,s)
 t = {wday = 1, year = 2003, yday = 124, month = 5, day = 4, isdst = false, hour = tonumber(h),min= tonumber(m),sec = tonumber(s)}
 	return os.time(t)
 end
 
-num_nodes = tonumber(arg[3])
+
 map = {}
 complete_states = {}
 
@@ -18,7 +29,7 @@ complete_states = {}
 for line in io.lines() do
 	--	parse the timestamp and convert it into seconds 
 	h,m,s = string.match(line, "(%d%d):(%d%d):(%d%d)")
-	if sec == nil then
+	if sec == nil then --first line
 		first_sec = timeInSec(h,m,s)
 		sec = 0
 	else
@@ -54,10 +65,24 @@ function process_complete_states()
 	return mand, opt
 end
 
-
+-- sorting the map by keys, from Roberto Ierusalimschy "Programming in Lua"
+function pairsByKeys(t)
+    local a = {}
+    for n in pairs(t) do table.insert(a, n) end
+    table.sort(a)
+    local i = 0      -- iterator variable
+    local iter = function ()   -- iterator function
+        i = i + 1
+        if a[i] == nil then return nil
+        else return a[i], t[a[i]]
+         end
+    end
+    return iter
+ end
+ 
 function process_view_states(map, mand, opt)
 	stats = {}
-	for i,v in pairs(map) do
+	for i,v in pairsByKeys(map) do
 		if not stats[i] then stats[i] = {m = 0, o = 0}; end
 		if previous then
 			v = misc.merge(v,previous)
@@ -73,10 +98,13 @@ function process_view_states(map, mand, opt)
 	return stats
 end
 
+
+
+
 complete = {process_complete_states()}
 stats = process_view_states(map, complete[1], complete[2])
 
 io.write("SECOND\tMANDATORY\tOPTIONAL\tMANDATORY PERCENTAGE\tOPTIONAL PERCENTAGE\n")
-for i,v in pairs(stats) do
+for i,v in pairsByKeys(stats) do
 	io.write(i.."\t"..v.m.."\t"..v.o.."\t"..v.m_percent.."\t"..v.o_percent.."\n")
 end
