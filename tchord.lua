@@ -57,8 +57,9 @@ me.id = compute_hash(table.concat({tostring(job.me.ip),":",tostring(job.me.port)
 -------------------------------------------------------------------------------
 
 --T-CHORD params
+STATS_PERIOD = tonumber(PARAMS["STATS_PERIOD"]) or 10
 GOSSIP_TIME = tonumber(PARAMS["GOSSIP_TIME"]) or 5
-TCHORD_EXPONENT = 7
+TCHORD_EXPONENT = 8
 --size of leaf set
 TCHORD_LEAF = tonumber(PARAMS["TCHORD_LEAF"]) or 3
 -- size of a random sample from pss to be used in TCHORD exchanges
@@ -571,18 +572,13 @@ TCHORD = {
 	precompute_views = function()
 		if TCHORD_CONVERGE then
 			local ranked = TCHORD.rank_all_nodes ()
-			print("Precomputing leaves")
 			for i = 1, TCHORD.l do
 				TCHORD.ideal_leaves[i] = ranked[i]
-				print("Ideal leaves "..i)
 				for i,v in ipairs(ranked[i]) do
-				print(v.."("..TCHORD.get_pos(v)..")")
 				end
 			end
-			print("Precomputing fingers")
 			for i = 1, TCHORD.t do
 				TCHORD.ideal_fingers[i] = TCHORD.precompute_fingers(ranked, i)
-				print("Ideal finger "..i..": "..TCHORD.get_pos(TCHORD.ideal_fingers[i][1]))
 			end
 		end
 	end,
@@ -649,7 +645,6 @@ TCHORD = {
 			end
 		end
 	TCHORD.leaves_lock:unlock()
-	
 	TCHORD.fingers_lock:lock()
 		for j = 1, TCHORD.t do
 			if TCHORD.fingers[j] then
@@ -665,6 +660,7 @@ TCHORD = {
 		end
 		TCHORD.fingers_lock:unlock()	
 		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. leaves_entries .." optional_entries:"..fingers_entries)
+		resource_stats()
 	end,
 
 
@@ -691,7 +687,7 @@ TCHORD = {
 		end,
 
 	create_message = function(partner)	
-		--local cm = misc.time()
+		local cm = misc.time()
 		PSS.view_copy_lock:lock()		
 		local pss_buffer = misc.dup(PSS.view_copy)
 		PSS.view_copy_lock:unlock()
@@ -776,17 +772,32 @@ TCHORD = {
 			TCHORD.cycle = TCHORD.cycle + 1
 			TCHORD.update_leaf_set(received)
 			TCHORD.update_routing_table(received)
-			TCHORD.debug(loc_cycle)
-			TCHORD.check_convergence()
+			--TCHORD.debug(loc_cycle)
+			--TCHORD.check_convergence()
 		end
 	end,
 	
 }
 
+function resource_stats()
+
+	log:print("MEMORY_USED_Kb ", gcinfo())
+	
+	local ts,tr = socket.stats()
+	local tot_KB_sent=misc.bitcalc(ts).kilobytes
+	local tot_KB_recv=misc.bitcalc(tr).kilobytes
+
+	log:print("BANDWIDTH_TOTAL ",tot_KB_sent, tot_KB_recv)
+	log:print("BANDWIDTH_RATE  ", (tot_KB_sent - bytesSent )/STATS_PERIOD, (tot_KB_recv - bytesReceived) /STATS_PERIOD)
+
+	bytesSent = tot_KB_sent
+	bytesReceived = tot_KB_recv
+end
+
 -------------------------------------------------------------------------------
 -- main loop
 -------------------------------------------------------------------------------
-max_time = 180
+max_time = 320
 
 function terminator()
   events.sleep(max_time)
@@ -798,24 +809,40 @@ function main()
 	events.thread(terminator)
 	log:print("UP: "..job.me.ip..":"..job.me.port)
 	log:print(table.concat({"ME: ", me.id, " (", TCHORD.get_pos(me), ")"}))
-	TCHORD.precompute_views()
-	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. TCHORD.l.." optional_entries:"..TCHORD.t)
--- initialize the peer sampling service
-	PSS.pss_init()
+	bytesSent = 0
+	bytesReceived = 0
+	
 -- init random number generator
 	math.randomseed(job.position*os.time())
+	
 -- wait for all nodes to start up (conservative)
 	events.sleep(2)
+	
 -- desynchronize the nodes
 	local desync_wait = (GOSSIP_TIME * math.random())
 	log:print("waiting for "..desync_wait.." to desynchronize")
 	events.sleep(desync_wait)
+
+
+--precompute ideal views for convergence test
+	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. TCHORD.l.." optional_entries:"..TCHORD.t)
+	TCHORD.precompute_views()
+	
+-- initialize pss
+	PSS.pss_init()
+	events.sleep(5)
+
+
 	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
 	events.sleep(10)
+	
 --initializing the leaf set
-	TCHORD.init() 
---launching TCHORD
+	TCHORD.init()
+	
 	TCHORD_thread = events.periodic(GOSSIP_TIME, TCHORD.active_thread)
+
+--stats thread (effectiveness and cost of construction)	
+	events.periodic(STATS_PERIOD, TCHORD.check_convergence)
 		
 end  
 
