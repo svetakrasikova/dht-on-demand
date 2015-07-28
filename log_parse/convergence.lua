@@ -41,15 +41,23 @@ for line in io.lines() do
 	
 	--collect complete view states
 	if string.match(line, "COMPLETE VIEW STATE") then
-		local id, mandatory, optional = string.match(line, "STATE.-(%d+).+mandatory_entries:(%d+).+optional_entries:(%d+)")
+		local id, mandatory, optional = string.match(line, "%((%d+)%)%s+COMPLETE VIEW STATE.+mandatory_entries:(%d+).+optional_entries:(%d+)")
 		if not complete_states[id] then complete_states[id] = {m = tonumber(mandatory), o = tonumber(optional)} end
 	end
 	
 	--collect view states per second
 	if string.match(line, "CURRENT VIEW STATE") then
-		local id, mandatory, optional = string.match(line, "STATE.-(%d+).+mandatory_entries:(%d+).+optional_entries:(%d+)")
-		map[sec][id] = {m = mandatory, o = optional}
-	end	
+		local id, mandatory, optional = string.match(line, "%((%d+)%)%s+CURRENT VIEW STATE.+mandatory_entries:(%d+).+optional_entries:(%d+)")
+		map[sec][id] = {m = mandatory, o = optional}		
+	end
+	
+	if string.match(line, "BANDWIDTH_TOTAL") then
+		local id, tot_KB_sent, tot_KB_recv = string.match(line, "%((%d+)%)%s+BANDWIDTH_TOTAL%s(.+)%s(.+)")
+		if map[sec][id] then map[sec][id].bw = tot_KB_recv + tot_KB_sent
+		else  map[sec][id] = {bw = tot_KB_recv + tot_KB_sent} end
+	--print("Only BW", id, tot_KB_sent, sec)
+	end
+
 end
 
 
@@ -83,13 +91,14 @@ function pairsByKeys(t)
 function process_view_states(map, mand, opt)
 	stats = {}
 	for i,v in pairsByKeys(map) do
-		if not stats[i] then stats[i] = {m = 0, o = 0}; end
+		if not stats[i] then stats[i] = {m = 0, o = 0, bw = 0}; end
 		if previous then
 			v = misc.merge(v,previous)
 		end
-		for _, w in pairs(v) do
-			stats[i].m = stats[i].m + w.m
-			stats[i].o = stats[i].o + w.o
+		for j, w in pairs(v) do
+			if w.m then stats[i].m = stats[i].m + w.m else stats[i].m = stats[i].m end
+			if w.o then stats[i].o = stats[i].o + w.o else stats[i].o = stats[i].o end
+			if w.bw then stats[i].bw = stats[i].bw + w.bw else stats[i].bw = stats[i].bw end
 		end
 		previous = v
 		stats[i].m_percent = stats[i].m/(mand/100)
@@ -104,7 +113,7 @@ end
 complete = {process_complete_states()}
 stats = process_view_states(map, complete[1], complete[2])
 
-io.write("SECOND\tMANDATORY\tOPTIONAL\tMANDATORY PERCENTAGE\tOPTIONAL PERCENTAGE\n")
+io.write("SECOND\tMANDATORY\tOPTIONAL\tMANDATORY PERCENTAGE\tOPTIONAL PERCENTAGE\tBANDWIDTH\n")
 for i,v in pairsByKeys(stats) do
-	io.write(i.."\t"..v.m.."\t"..v.o.."\t"..v.m_percent.."\t"..v.o_percent.."\n")
+	io.write(i.."\t"..v.m.."\t"..v.o.."\t"..v.m_percent.."\t"..v.o_percent.."\t"..v.bw.."\n")
 end
