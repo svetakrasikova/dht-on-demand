@@ -27,17 +27,22 @@ complete_states = {}
 
 --parsing the log file line and collecting the number of optional and mandatory entries in the views per second
 for line in io.lines() do
-	--	parse the timestamp and convert it into seconds 
-	h,m,s = string.match(line, "(%d%d):(%d%d):(%d%d)")
-	if sec == nil then --first line
-		first_sec = timeInSec(h,m,s)
-		sec = 0
-	else
+	--	parse the timestamp and convert it into seconds
+	if first_sec then
+		h,m,s = string.match(line, "(%d%d):(%d%d):(%d%d)")
 		next_sec = timeInSec(h,m,s) - first_sec
 		if next_sec < 0 then sec = 0 else sec = next_sec end
 	end
 	
-	if not map[sec] then map[sec] = {} end
+	if string.match(line, "VIEW CONSTRUCTION START TIME") then
+		h,m,s = string.match(line, "(%d%d):(%d%d):(%d%d)")
+		first_sec = timeInSec(h,m,s)
+		sec = 0
+	end
+	
+	if sec then 
+		if not map[sec] then map[sec] = {} end
+	end
 	
 	--collect complete view states
 	if string.match(line, "COMPLETE VIEW STATE") then
@@ -53,9 +58,8 @@ for line in io.lines() do
 	
 	if string.match(line, "BANDWIDTH_TOTAL") then
 		local id, tot_KB_sent, tot_KB_recv = string.match(line, "%((%d+)%)%s+BANDWIDTH_TOTAL%s(.+)%s(.+)")
-		if map[sec][id] then map[sec][id].bw = tot_KB_recv + tot_KB_sent
-		else  map[sec][id] = {bw = tot_KB_recv + tot_KB_sent} end
-	--print("Only BW", id, tot_KB_sent, sec)
+		if map[sec][id] then map[sec][id].bw = tot_KB_sent
+		else  map[sec][id] = {bw = tot_KB_sent} end
 	end
 
 end
