@@ -59,7 +59,7 @@ me.id = compute_hash(table.concat({tostring(job.me.ip),":",tostring(job.me.port)
 --T-CHORD params
 STATS_PERIOD = tonumber(PARAMS["STATS_PERIOD"]) or 10
 GOSSIP_TIME = tonumber(PARAMS["GOSSIP_TIME"]) or 5
-TCHORD_EXPONENT = 8
+TCHORD_EXPONENT = 7
 --size of leaf set
 TCHORD_LEAF = tonumber(PARAMS["TCHORD_LEAF"]) or 3
 -- size of a random sample from pss to be used in TCHORD exchanges
@@ -315,7 +315,7 @@ PSS = {
 		for i=1,#job.nodes do indexes[#indexes+1]=i end
 		table.remove(indexes,job.position) --remove myself
 		local selected_indexes = misc.random_pick(indexes,math.min(PSS.c,#indexes))	
-		for _,v in ipairs(selected_indexes) do
+		for _,v in pairs(selected_indexes) do
 				local a_peer = job.nodes[v]
 				local hashed_index = compute_hash(tostring(a_peer.ip) ..":"..tostring(a_peer.port))
 		 		PSS.view[#PSS.view+1] = 
@@ -660,7 +660,7 @@ TCHORD = {
 		end
 		TCHORD.fingers_lock:unlock()	
 		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. leaves_entries .." optional_entries:"..fingers_entries)
-		resource_stats()
+		--resource_stats()
 	end,
 
 
@@ -773,7 +773,6 @@ TCHORD = {
 			TCHORD.update_leaf_set(received)
 			TCHORD.update_routing_table(received)
 			--TCHORD.debug(loc_cycle)
-			--TCHORD.check_convergence()
 		end
 	end,
 	
@@ -797,7 +796,7 @@ end
 -------------------------------------------------------------------------------
 -- main loop
 -------------------------------------------------------------------------------
-max_time = 320
+max_time = 600
 
 function terminator()
   events.sleep(max_time)
@@ -830,15 +829,18 @@ function main()
 	
 -- initialize pss
 	PSS.pss_init()
-	events.sleep(5)
+	events.sleep(25)
 
 
 	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
-	events.sleep(10)
+	events.sleep(20)
 	
 --initializing the leaf set
+	log:print("VIEW CONSTRUCTION START TIME", misc.time())
 	TCHORD.init()
+	events.sleep(20)
 	
+
 	TCHORD_thread = events.periodic(GOSSIP_TIME, TCHORD.active_thread)
 
 --stats thread (effectiveness and cost of construction)	

@@ -237,6 +237,7 @@ end
 TKAD_MESSAGE = tonumber(PARAMS["TKAD_MESSAGE"]) or 6
 TKAD_VIEW = tonumber(PARAMS["TKAD_VIEW"]) or 10
 GOSSIP_TIME = tonumber(PARAMS["GOSSIP_TIME"]) or 10
+STATS_PERIOD = tonumber(PARAMS["STATS_PERIOD"]) or 10
 K_SIZE = tonumber(PARAMS["K_SIZE"]) or 3
 TKAD_RANDOM = tonumber(PARAMS["TKAD_RANDOM"]) or 5
 TKAD_CONVERGE = PARAMS["TKAD_CONVERGE"] or true
@@ -749,6 +750,7 @@ TKAD = {
 			end
 		end
 		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. 0 .." optional_entries:"..entries)
+		resource_stats()
 	end,
 -------------------------------------------------------------------------------
 -- T-KAD
@@ -869,17 +871,30 @@ TKAD = {
 			TKAD.update_view(received)
 			TKAD.update_prefix_table(received)
 			--TKAD.debug(loc_cycle,true)
-			TKAD.check_convergence()
 		end
 	end,
 	
 	}
 
 
+function resource_stats()
+	log:print("MEMORY_USED_Kb ", gcinfo())
+	
+	local ts,tr = socket.stats()
+	local tot_KB_sent=misc.bitcalc(ts).kilobytes
+	local tot_KB_recv=misc.bitcalc(tr).kilobytes
+
+	log:print("BANDWIDTH_TOTAL ",tot_KB_sent, tot_KB_recv)
+	log:print("BANDWIDTH_RATE  ", (tot_KB_sent - bytesSent )/STATS_PERIOD, (tot_KB_recv - bytesReceived) /STATS_PERIOD)
+
+	bytesSent = tot_KB_sent
+	bytesReceived = tot_KB_recv
+end
+
 -------------------------------------------------------------------------------
 -- Main loop
 -------------------------------------------------------------------------------
-max_time = 250
+max_time = 600
 
 function terminator()
   events.sleep(max_time)
@@ -889,23 +904,34 @@ end
 function main()
 -- this thread will be in charge of killing the node after max_time seconds
 	events.thread(terminator)
+	
 	log:print("UP: "..job.me.ip..":"..job.me.port)
+	
 -- init random number generator
 	math.randomseed(job.position*os.time())
+	
 -- wait for all nodes to start up (conservative)
   	events.sleep(2)
+  	
 -- desynchronize the nodes
 	local desync_wait = (GOSSIP_TIME * math.random())
   log:print("waiting for "..desync_wait.." to desynchronize")
 	events.sleep(desync_wait)
-	PSS.pss_init()
-	events.sleep(5)
-	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread)
-	TKAD.precompute_routing_table()
-	events.sleep(10)
 	
+	PSS.pss_init()
+	events.sleep(20)
+	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread)
+	
+	TKAD.precompute_routing_table()
+
+	log:print("VIEW CONSTRUCTION START TIME", misc.time())	
 	TKAD.init()
+	events.sleep(20)
+	
 	TKAD_thread = events.periodic(GOSSIP_TIME, TKAD.active_thread)
+	
+	events.periodic(STATS_PERIOD, TKAD.check_convergence)
+	
 end
 
 events.thread(main)

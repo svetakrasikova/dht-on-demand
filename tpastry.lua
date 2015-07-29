@@ -53,6 +53,7 @@ actions = 0
 
 --T-Pastry params
 GOSSIP_TIME = tonumber(PARAMS["GOSSIP_TIME"]) or 5
+STATS_PERIOD = tonumber(PARAMS["STATS_PERIOD"]) or 10
 TPASTRY_HB_TIMEOUT = tonumber(PARAMS["TPASTRY_HB_TIMEOUT"]) or 300
 TPASTRY_CONVERGE = PARAMS["PASTRY_CONVERGE"] or true
 TPASTRY_RANDOM = tonumber(PARAMS["TPASTRY_RANDOM"]) or 6
@@ -607,7 +608,8 @@ TPASTRY = {
 		if TPASTRY_CONVERGE then
 			local ids = TPASTRY.hash_all()
 			TPASTRY.precompute_leaves(ids)
-			return TPASTRY.precompute_routing_table(ids)
+			TPASTRY.opt_entries = TPASTRY.precompute_routing_table(ids)
+			log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. leaf_size.." optional_entries:"..TPASTRY.opt_entries)
 		end
 	end,
 		
@@ -649,6 +651,7 @@ TPASTRY = {
 		end
 		TPASTRY.leaves_lock:unlock()
 		log:print("CURRENT VIEW STATE "..me.id.." mandatory_entries:".. leaf_size-errors_l .." optional_entries:"..TPASTRY.opt_entries-errors_rt)
+		resource_stats()
 	end,
 	
 	display_ideal_rt = function()
@@ -741,7 +744,7 @@ end,
 			TPASTRY.leaves_increasing = succ
 		end
 		TPASTRY.leaves_lock:unlock()
-		print("update leaf set", misc.time()-uls)
+		--print("update leaf set", misc.time()-uls)
 	end,
 
 	-- fills in any missing table entries by the nodes from the received message
@@ -773,7 +776,7 @@ end,
 			end
 		end
 		TPASTRY.rt_lock:unlock()
-		print("update prefix table", misc.time()-upt)
+		--print("update prefix table", misc.time()-upt)
 	end,
 
 	passive_thread = function(received,sender)
@@ -808,12 +811,26 @@ end,
 			TPASTRY.update_leaf_set(received)
 			TPASTRY.update_prefix_table(received)
 			--TPASTRY.debug(loc_cycle)
-			--TPASTRY.display_ideal_rt()
-			TPASTRY.check_convergence()
 		end
 	end,
 
 }
+
+function resource_stats()
+
+	log:print("MEMORY_USED_Kb ", gcinfo())
+	
+	local ts,tr = socket.stats()
+	local tot_KB_sent=misc.bitcalc(ts).kilobytes
+	local tot_KB_recv=misc.bitcalc(tr).kilobytes
+
+	log:print("BANDWIDTH_TOTAL ",tot_KB_sent, tot_KB_recv)
+	log:print("BANDWIDTH_RATE  ", (tot_KB_sent - bytesSent )/STATS_PERIOD, (tot_KB_recv - bytesReceived) /STATS_PERIOD)
+
+	bytesSent = tot_KB_sent
+	bytesReceived = tot_KB_recv
+end
+
 
 -------------------------------------------------------------------------------
 -- Main loop
@@ -826,22 +843,32 @@ end
 function main()
 -- this thread will be in charge of killing the node after max_time seconds
 	events.thread(terminator)
+	
 -- init random number generator
 	math.randomseed(job.position*os.time())
+	
 -- wait for all nodes to start up (conservative)
   	events.sleep(2)
+  	
 -- desynchronize the nodes
 	local desync_wait = (GOSSIP_TIME * math.random())
-  	log:print("waiting for "..desync_wait.." to desynchronize")
+  log:print("waiting for "..desync_wait.." to desynchronize")
 	events.sleep(desync_wait)
-		TPASTRY.opt_entries = TPASTRY.precompute_views()
-	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. leaf_size.." optional_entries:"..TPASTRY.opt_entries)
-	-- initialize the peer sampling service
+	
+--	precompute view for convergence test
+	TPASTRY.precompute_views()	
+	
+	-- initialize pss
 	PSS.pss_init()
 	PSS_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
 	events.sleep(10)
+	
+	--initialize tpastry
 	TPASTRY.init()
 	tpastry_thread = events.periodic(GOSSIP_TIME, TPASTRY.active_thread)
+	
+	--stats thread (effectiveness and cost of construction)	
+	events.periodic(STATS_PERIOD, TPASTRY.check_convergence)
 	
 end
 

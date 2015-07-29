@@ -43,6 +43,7 @@ k = math.floor(math.sqrt(n))
 
 --TKELIPS params
 GOSSIP_TIME= tonumber(PARAMS["GOSSIP_TIME"]) or 5
+STATS_PERIOD= tonumber(PARAMS["STATS_PERIOD"]) or 10
 TKELIPS_RANDOM = tonumber(PARAMS["TKELIPS_RANDOM"]) or 6
 TKELIPS_MESSAGE_SIZE = tonumber(PARAMS["TKELIPS_MESSAGE_SIZE"]) or 10
 TKELIPS_CONTACT_SIZE = tonumber(PARAMS["TKELIPS_CONTACT_SIZE"]) or 2
@@ -500,6 +501,8 @@ TKELIPS = {
 					TKELIPS.complete_aff_group[#TKELIPS.complete_aff_group+1] = v
 				end
 			end
+			log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. #TKELIPS.complete_aff_group+k .." optional_entries:"..k*(TKELIPS.c-1))
+			resource_stats()
 		end
 	end,
 	
@@ -674,7 +677,6 @@ TKELIPS = {
 		TKELIPS.contacts_lock:unlock()
 	end,
 	
-	--ongoing_rpc=false,
 
 	passive_thread = function(received,sender)
 		--if TKELIPS.ongoing_rpc == true then return false end
@@ -685,7 +687,6 @@ TKELIPS = {
 	end,
 
 	active_thread = function()
-		--TKELIPS.ongoing_rpc = true
 		local partner = TKELIPS.select_peer()
 		local buffer = TKELIPS.create_message(partner)
 		local try = 0
@@ -705,20 +706,12 @@ TKELIPS = {
 		end
 		if ok then
 			local received = res[1]
-			if received==false then
-					log:print("TKELIPS received false due to ongoing RPC, will try again in a short while")
-					events.sleep(math.random())	
-					--the call was aborted due to pending RPC at peer's node
-				else
-					local loc_cycle = TKELIPS.cycle+1
-					TKELIPS.cycle = TKELIPS.cycle+1
-					TKELIPS.update_aff_group(received)
-					TKELIPS.update_contacts(received)
-					TKELIPS.check_convergence()
-					--TKELIPS.debug(loc_cycle)
-				end		
+			local loc_cycle = TKELIPS.cycle+1
+			TKELIPS.cycle = TKELIPS.cycle+1
+			TKELIPS.update_aff_group(received)
+			TKELIPS.update_contacts(received)
+			--TKELIPS.debug(loc_cycle)	
 		end
-		--TKELIPS.ongoing_rpc = false
 	end,
 	
 }
@@ -875,6 +868,21 @@ KELIPS_LOOKUP = {
 
 }
 
+function resource_stats()
+
+	log:print("MEMORY_USED_Kb ", gcinfo())
+	
+	local ts,tr = socket.stats()
+	local tot_KB_sent=misc.bitcalc(ts).kilobytes
+	local tot_KB_recv=misc.bitcalc(tr).kilobytes
+
+	log:print("BANDWIDTH_TOTAL ",tot_KB_sent, tot_KB_recv)
+	log:print("BANDWIDTH_RATE  ", (tot_KB_sent - bytesSent )/STATS_PERIOD, (tot_KB_recv - bytesReceived) /STATS_PERIOD)
+
+	bytesSent = tot_KB_sent
+	bytesReceived = tot_KB_recv
+end
+
 
 
 -------------------------------------------------------------------------------
@@ -890,13 +898,15 @@ end
 function main()
 -- this thread will be in charge of killing the node after max_time seconds
 	events.thread(terminator)
+	
 	log:print("UP: "..job.me.ip..":"..job.me.port)
 	log:print(table.concat({"ME: ", me.id, " (", me.id%k, ")"}))
+	
 -- precompute current node affinity group for checking convergence
-	TKELIPS.precompute_aff_group()
-	log:print("COMPLETE VIEW STATE "..me.id.." mandatory_entries:".. #TKELIPS.complete_aff_group+k .." optional_entries:"..k*(TKELIPS.c-1))
--- initialize the peer sampling service
-	PSS.pss_init()
+
+	
+	
+
 -- init random number generator
 	math.randomseed(job.position*os.time())
 -- wait for all nodes to start up (conservative)
@@ -904,12 +914,20 @@ function main()
 -- desynchronize the nodes
 	local desync_wait = (GOSSIP_TIME * math.random())
 	log:print("waiting for "..desync_wait.." to desynchronize")
-	events.sleep(desync_wait) 
+	events.sleep(desync_wait)
+	
+	PSS.pss_init()
+	events.sleep(10)	
 	pss_thread = events.periodic(PSS_SHUFFLE_PERIOD, PSS.pss_active_thread) 
 	events.sleep(10)
-	TKELIPS_thread = events.periodic(GOSSIP_TIME, TKELIPS.active_thread)
 	
---	events.sleep(250)
+	TKELIPS.precompute_aff_group()
+	TKELIPS_thread = events.periodic(GOSSIP_TIME, TKELIPS.active_thread)
+
+-- test convergence
+	if TKELIPS_CONVERGE then
+	events.periodic(STATS_PERIOD, TKELIPS.check_convergence)
+	end
 	
 -- test insertion and lookup
 	if KELIPS_LOOKUP_TEST then
